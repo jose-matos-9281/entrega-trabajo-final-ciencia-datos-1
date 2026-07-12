@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 create-data = "oulad_ml_project.data_generator:main"
+eda = "oulad_ml_project.eda:main"
 ml_pipeline = "oulad_ml_project.ml_pipeline:main"
 train-inference-model = "oulad_ml_project.inference:main_train"
 predict-excel = "oulad_ml_project.inference:main_predict"
@@ -26,4 +27,3 @@ predict-excel = "oulad_ml_project.inference:main_predict"
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
 build-backend = "uv_build"
-

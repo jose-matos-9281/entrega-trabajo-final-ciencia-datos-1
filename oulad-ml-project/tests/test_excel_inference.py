@@ -13,7 +13,14 @@ from oulad_ml_project.inference import (
 )
 
 
-def write_workbook(path: Path, *, missing_registration: bool = False) -> None:
+def write_workbook(
+    path: Path,
+    *,
+    missing_registration: bool = False,
+    missing_optional_features: bool = False,
+    unresolved_vle_date: int | None = None,
+    ambiguous_vle_module: bool = False,
+) -> None:
     students = pd.DataFrame(
         {
             "guid_student_id": ["student-1", "student-2"],
@@ -22,10 +29,10 @@ def write_workbook(path: Path, *, missing_registration: bool = False) -> None:
             "gender": ["F", "M"],
             "region": ["North", "New region"],
             "highest_education": ["Bachelor", "Master"],
-            "imd_band": ["20-30%", "30-40%"],
-            "age_band": ["0-35", "35-55"],
-            "num_of_prev_attempts": [0, 1],
-            "studied_credits": [60, 90],
+            "imd_band": ["20-30%", None if missing_optional_features else "30-40%"],
+            "age_band": [None if missing_optional_features else "0-35", "35-55"],
+            "num_of_prev_attempts": [0, None if missing_optional_features else 1],
+            "studied_credits": [None if missing_optional_features else 60, 90],
             "disability": ["N", "N"],
             "final_result": ["Pass", "Fail"],
         }
@@ -39,6 +46,9 @@ def write_workbook(path: Path, *, missing_registration: bool = False) -> None:
             "date_unregistration": [None] if missing_registration else [None, None],
         }
     )
+    if ambiguous_vle_module:
+        students.loc[len(students)] = ["student-2", "CCC", "2014J", "M", "North", "Master", "30-40%", "35-55", 1, 90, "N", "Pass"]
+        registrations.loc[len(registrations)] = ["student-2", "CCC", "2014J", -5, None]
     clicks = pd.DataFrame(
         {
             "guid_student_id": ["student-1", "student-2"],
@@ -49,9 +59,13 @@ def write_workbook(path: Path, *, missing_registration: bool = False) -> None:
             "sum_clics": [4, 7],
         }
     )
+    if unresolved_vle_date is not None:
+        clicks.loc[len(clicks)] = ["unknown-student", 30, None, "2024J", unresolved_vle_date, 5]
     courses = pd.DataFrame(
         {"code_module": ["AAA", "BBB"], "code_presentation": ["2013J", "2014J"], "module_presentation_length": [100, 120]}
     )
+    if ambiguous_vle_module:
+        courses.loc[len(courses)] = ["CCC", "2014J", 120]
     assessments = pd.DataFrame({"score": [100], "final_result": ["Pass"], "date_submitted": [90]})
     with pd.ExcelWriter(path) as writer:
         students.to_excel(writer, sheet_name="StudentInfo", index=False)
@@ -81,7 +95,39 @@ class ExcelInferenceTest(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "identical enrollment coverage"):
                 build_excel_inference_frame(workbook, 30)
 
-    def test_persisted_model_predicts_with_oov_categories(self):
+    def test_adapter_ignores_unresolved_module_activity_after_cutoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workbook = Path(directory) / "input.xlsx"
+            write_workbook(workbook, unresolved_vle_date=31)
+            frame = build_excel_inference_frame(workbook, 30)
+
+        self.assertEqual(frame["total_clicks"].tolist(), [4, 7])
+
+    def test_adapter_discards_unresolved_module_activity_before_cutoff_with_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workbook = Path(directory) / "input.xlsx"
+            write_workbook(workbook, unresolved_vle_date=30)
+            with self.assertWarnsRegex(
+                UserWarning,
+                r"Discarded 1 pre-cutoff VLE_clickStream events: 1 without an enrollment candidate\.",
+            ):
+                frame = build_excel_inference_frame(workbook, 30)
+
+        self.assertEqual(frame["total_clicks"].tolist(), [4, 7])
+
+    def test_adapter_discards_ambiguous_module_activity_before_cutoff_with_warning(self):
+        with tempfile.TemporaryDirectory() as directory:
+            workbook = Path(directory) / "input.xlsx"
+            write_workbook(workbook, ambiguous_vle_module=True)
+            with self.assertWarnsRegex(
+                UserWarning,
+                r"Discarded 1 pre-cutoff VLE_clickStream events: 1 with ambiguous enrollment candidates\.",
+            ):
+                frame = build_excel_inference_frame(workbook, 30)
+
+        self.assertEqual(frame["total_clicks"].tolist(), [4, 0, 0])
+
+    def test_persisted_model_predicts_with_oov_and_missing_optional_features(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             training = pd.DataFrame(
@@ -113,11 +159,15 @@ class ExcelInferenceTest(unittest.TestCase):
             output = root / "predictions.csv"
             training.to_csv(training_path, index=False)
             metadata_path.write_text(json.dumps({"cutoff_day": 30}), encoding="utf-8")
-            write_workbook(workbook)
+            write_workbook(workbook, missing_optional_features=True)
             train_inference_model(training_path, metadata_path, root / "artifacts")
+            frame = build_excel_inference_frame(workbook, 30)
             predict_excel(workbook, root / "artifacts", output, 30)
             predictions = pd.read_csv(output)
 
+        self.assertTrue(
+            frame[["imd_band", "age_band", "num_of_prev_attempts", "studied_credits"]].isna().any().all()
+        )
         self.assertEqual(len(predictions), 2)
         self.assertIn("region", predictions.loc[1, "oov_categorical_fields"])
         self.assertEqual(predictions.loc[0, "oov_key_fields"], "none")

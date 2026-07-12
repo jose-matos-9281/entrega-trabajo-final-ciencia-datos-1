@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import warnings
 from pathlib import Path
 
 import joblib
@@ -60,10 +61,17 @@ def _require_unique(frame: pd.DataFrame, columns: list[str], source: str) -> Non
         raise ValueError(f"{source} has duplicate enrollment keys: {columns}")
 
 
-def _numeric(frame: pd.DataFrame, columns: tuple[str, ...], source: str) -> None:
+def _numeric(
+    frame: pd.DataFrame,
+    columns: tuple[str, ...],
+    source: str,
+    *,
+    allow_missing: bool = False,
+) -> None:
     for column in columns:
         frame[column] = pd.to_numeric(frame[column], errors="coerce")
-    _require_complete(frame, columns, source)
+    if not allow_missing:
+        _require_complete(frame, columns, source)
 
 
 def _read_excel_sheets(excel_path: Path) -> dict[str, pd.DataFrame]:
@@ -97,9 +105,14 @@ def build_excel_inference_frame(excel_path: Path, cutoff_day: int) -> pd.DataFra
     students = students.rename(columns={"guid_student_id": "id_student"})[
         [*KEY_COLUMNS, *CATEGORICAL_FEATURES, "num_of_prev_attempts", "studied_credits"]
     ].copy()
-    _require_complete(students, [*KEY_COLUMNS, *CATEGORICAL_FEATURES], "StudentInfo")
+    _require_complete(students, KEY_COLUMNS, "StudentInfo")
     _require_unique(students, KEY_COLUMNS, "StudentInfo")
-    _numeric(students, ("num_of_prev_attempts", "studied_credits"), "StudentInfo")
+    _numeric(
+        students,
+        ("num_of_prev_attempts", "studied_credits"),
+        "StudentInfo",
+        allow_missing=True,
+    )
 
     registration_columns = {
         "guid_studente_id", "code_module", "code_presentation", "date_registration",
@@ -140,23 +153,43 @@ def build_excel_inference_frame(excel_path: Path, cutoff_day: int) -> pd.DataFra
     )[[*KEY_COLUMNS, "id_site", "date", "clicks"]].copy()
     _require_complete(clicks, ("id_student", "code_presentation", "id_site", "date", "clicks"), "VLE_clickStream")
 
-    # A blank module is accepted only when the enrollment relation proves one value.
+    _numeric(clicks, ("date", "clicks"), "VLE_clickStream")
+    if (clicks["clicks"] < 0).any():
+        raise ValueError("VLE_clickStream has negative click counts")
+
+    # Events after the cutoff cannot affect inference features, so discard them
+    # before resolving their optional source module values.
+    pre_cutoff_clicks = clicks.loc[clicks["date"] <= cutoff_day].copy()
     enrollment_modules = students[["id_student", "code_presentation", "code_module"]]
-    blank_module = clicks["code_module"].isna()
+    blank_module = pre_cutoff_clicks["code_module"].isna()
     if blank_module.any():
-        resolved = clicks.loc[blank_module, ["id_student", "code_presentation"]].merge(
-            enrollment_modules,
+        module_counts = enrollment_modules.groupby(["id_student", "code_presentation"])["code_module"].size()
+        blank_keys = pd.MultiIndex.from_frame(pre_cutoff_clicks.loc[blank_module, ["id_student", "code_presentation"]])
+        candidate_counts = module_counts.reindex(blank_keys)
+        no_candidate = candidate_counts.isna()
+        ambiguous_candidate = candidate_counts.gt(1)
+        discard = no_candidate | ambiguous_candidate
+        if discard.any():
+            reasons = []
+            if no_candidate.any():
+                reasons.append(f"{no_candidate.sum()} without an enrollment candidate")
+            if ambiguous_candidate.any():
+                reasons.append(f"{ambiguous_candidate.sum()} with ambiguous enrollment candidates")
+            warnings.warn(
+                f"Discarded {discard.sum()} pre-cutoff VLE_clickStream events: {'; '.join(reasons)}.",
+                UserWarning,
+                stacklevel=2,
+            )
+            pre_cutoff_clicks = pre_cutoff_clicks.drop(index=pre_cutoff_clicks.index[blank_module][discard.to_numpy()])
+            blank_module = pre_cutoff_clicks["code_module"].isna()
+        resolved = pre_cutoff_clicks.loc[blank_module, ["id_student", "code_presentation"]].merge(
+            enrollment_modules.drop_duplicates(["id_student", "code_presentation"]),
             on=["id_student", "code_presentation"],
             how="left",
             validate="many_to_one",
         )
-        if resolved["code_module"].isna().any():
-            raise ValueError("VLE_clickStream has unresolved module values")
-        clicks.loc[blank_module, "code_module"] = resolved["code_module"].to_numpy()
-    _require_complete(clicks, KEY_COLUMNS, "VLE_clickStream")
-    _numeric(clicks, ("date", "clicks"), "VLE_clickStream")
-    if (clicks["clicks"] < 0).any():
-        raise ValueError("VLE_clickStream has negative click counts")
+        pre_cutoff_clicks.loc[blank_module, "code_module"] = resolved["code_module"].to_numpy()
+    _require_complete(pre_cutoff_clicks, KEY_COLUMNS, "VLE_clickStream")
 
     enrollment = students.merge(registrations, on=KEY_COLUMNS, how="inner", validate="one_to_one")
     if len(enrollment) != len(students) or len(enrollment) != len(registrations):
@@ -166,7 +199,6 @@ def build_excel_inference_frame(excel_path: Path, cutoff_day: int) -> pd.DataFra
     )
     _require_complete(enrollment, ("course_duration_days",), "cursos coverage")
 
-    pre_cutoff_clicks = clicks.loc[clicks["date"] <= cutoff_day].copy()
     if not pre_cutoff_clicks.empty:
         activity = pre_cutoff_clicks.groupby(KEY_COLUMNS, as_index=False).agg(
             total_clicks=("clicks", "sum"),
