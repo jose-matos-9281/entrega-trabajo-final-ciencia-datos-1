@@ -1,0 +1,511 @@
+"""
+=============================================================================
+ PIPELINE COMPLETO DE MACHINE LEARNING - OULAD + Experimento Kongo
+=============================================================================
+ Proyecto Final Colaborativo - Machine Learning sobre OULAD
+ Curso: Data Analysis | Fecha: Julio 2026
+
+ Este módulo implementa el pipeline OSEMN completo bajo POO:
+   O - Obtain:  Carga del dataset
+   S - Scrub:   Limpieza, EDA, manejo de missing values
+   E - Explore: Análisis univariado, bivariado, correlacional
+   M - Model:   Entrenamiento de modelos supervisados y no supervisados
+   N - iNterpret: Métricas, feature importance, gráficos, CSVs
+
+ Estructura de clases:
+   - ExploratoryDataAnalysis: EDA completo con gráficos y estadísticas
+   - DataPreprocessor:        Limpieza, imputación, codificación ordinal
+   - ModelTrainer:            Entrenamiento de 12 modelos + clustering
+   - MLPipeline:              Orquestador que conecta todo el flujo
+
+
+=============================================================================
+"""
+
+import os
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.linear_model import LogisticRegression, LinearRegression
+from sklearn.tree import DecisionTreeClassifier
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier
+from sklearn.svm import SVC
+from sklearn.neighbors import KNeighborsRegressor
+from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_score,
+                             roc_auc_score, confusion_matrix, mean_squared_error, r2_score,
+                             ConfusionMatrixDisplay, silhouette_score)
+from sklearn.cluster import KMeans
+import warnings
+from pathlib import Path
+warnings.filterwarnings('ignore')
+
+# ------------------------------------------------------------
+# Configuración de rutas del proyecto
+# ------------------------------------------------------------
+
+
+# ------------------------------------------------------------
+# CLASE 3: ENTRENAMIENTO Y EVALUACIÓN DE MODELOS
+# ------------------------------------------------------------
+class ModelTrainer:
+    """
+    Entrenamiento de modelos supervisados y no supervisados.
+
+    Según la rúbrica (8 pts):
+      - Mínimo 3 algoritmos supervisados por tarea
+      - Variables dicotómica, ordinal e intervalo/razón
+      - Tendencias no-supervisadas (KMeans)
+      - Cálculo manual de F1-score (TP, FP, TN, FN)
+      - Feature importance
+      - CSVs de predicciones (y_test, y_pred)
+      - Matrices de confusión
+      - Métricas: precision_macro, recall_macro, f1_macro,
+                  accuracy, roc_auc, mse, r2
+
+    Modelos por tipo:
+      - Binario (passed): LogisticRegression, RandomForest, GradientBoosting
+      - Ordinal (performance_tier): DecisionTree, RandomForest, GradientBoosting
+      - Regresión (final_grade): LinearRegression, RandomForestRegressor, KNN
+      - Kongo experiment: LogisticRegression, RandomForest, SVC
+      - No supervisado: KMeans (k=3)
+    """
+
+    def __init__(self, X, y_dict, output_dir:Path):
+        self.X = X
+        self.y_dict = y_dict
+        self.output_dir = output_dir
+        self.results = {}
+        self.models = {}
+
+    def split_data(self, target_name, target_col=None):
+        """
+        Divide datos en entrenamiento (75%) y prueba (25%).
+
+        Usa stratify para clasificación si hay <= 10 clases para mantener
+        la proporción de clases en train y test.
+
+        Returns:
+            X_train, X_test, y_train, y_test, label_encoder (o None)
+        """
+        y = self.y_dict[target_name]
+        if target_col and target_col in self.y_dict:
+            y = self.y_dict[target_col]
+        y_enc, le = self.encode_ordinal_target(y)
+        strat = y_enc if len(np.unique(y_enc)) <= 10 else None
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, y_enc, test_size=0.25, random_state=42, stratify=strat
+        )
+        return X_train, X_test, y_train, y_test, le
+
+    def encode_ordinal_target(self, y):
+        """
+        Codifica targets categóricos/ordinales a valores numéricos.
+        """
+        if y.dtype == 'object' or y.dtype.name == 'category':
+            le = LabelEncoder()
+            y_enc = le.fit_transform(y.astype(str))
+            return y_enc, le
+        return y, None
+
+    def train_binary(self):
+        """
+        Modelo dicotómico: predicción de 'passed' (aprobado/reprobado).
+
+        Algoritmos:
+          - LogisticRegression: modelo lineal interpretable
+          - RandomForest: ensemble de árboles, captura no linealidades
+          - GradientBoosting: boosting secuencial, alta precisión
+
+        Métricas:
+          - accuracy, precision_macro, recall_macro, f1_macro, roc_auc
+          - TP, FP, TN, FN (cálculo manual de F1-score)
+          - Feature importance (coef_ o feature_importances_)
+        """
+        print("\n========== CLASIFICACIÓN BINARIA: Aprobado ==========")
+        X_train, X_test, y_train, y_test, _ = self.split_data('passed', 'passed')
+
+        models = {
+            'LogisticRegression': LogisticRegression(max_iter=1000, random_state=42),
+            'RandomForest': RandomForestClassifier(n_estimators=100, random_state=42),
+            'GradientBoosting': GradientBoostingClassifier(n_estimators=100, random_state=42)
+        }
+
+        binary_results = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
+
+            tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+            mse_val = mean_squared_error(y_test, y_pred)
+            r2_val = r2_score(y_test, y_pred)
+            results = {
+                'model': name,
+                'type': 'binary',
+                'y_test': y_test.tolist(),
+                'y_pred': y_pred.tolist(),
+                'accuracy': accuracy_score(y_test, y_pred),
+                'precision_macro': precision_score(y_test, y_pred, average='macro'),
+                'recall_macro': recall_score(y_test, y_pred, average='macro'),
+                'f1_macro': f1_score(y_test, y_pred, average='macro'),
+                'roc_auc': roc_auc_score(y_test, y_proba) if y_proba is not None else None,
+                'mse': mse_val,
+                'r2': r2_val,
+                'msePI2': mse_val,
+                'r2PI2': r2_val,
+                'TP': int(tp), 'FP': int(fp), 'TN': int(tn), 'FN': int(fn),
+                'f1_score': f1_score(y_test, y_pred)
+            }
+            binary_results[name] = results
+            print(f"{name}: Accuracy={results['accuracy']:.4f}, F1={results['f1_macro']:.4f}, AUC={results['roc_auc']:.4f}")
+            print(f"  Matriz de Confusión: TP={tp}, FP={fp}, TN={tn}, FN={fn}")
+
+            if hasattr(model, 'feature_importances_'):
+                results['feature_importances'] = model.feature_importances_.tolist()
+            elif hasattr(model, 'coef_'):
+                results['feature_importances'] = model.coef_[0].tolist()
+            self.models[f'binary_{name}'] = model
+
+        self.results['binary'] = binary_results
+        return binary_results
+
+    def train_ordinal(self):
+        """
+        Modelo ordinal: predicción de 'performance_tier' (Fail/Low/Medium/High).
+
+        Algoritmos:
+          - DecisionTree: interpretable, propenso a overfitting
+          - RandomForest: ensemble robusto
+          - GradientBoosting: boosting con manejo ordinal
+
+        Nota: Se usa MSE como métrica adicional porque los niveles tienen orden.
+        """
+        print("\n========== CLASIFICACIÓN ORDINAL: Nivel de Rendimiento ==========")
+        y_original = self.y_dict.get('performance_tier_enc', self.y_dict.get('performance_tier', None))
+        if y_original is None:
+            print("performance_tier no encontrado, saltando...")
+            return {}
+        y_enc = y_original if y_original.dtype in [np.int64, np.float64, int, float] \
+                          else LabelEncoder().fit_transform(y_original.astype(str))
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, y_enc, test_size=0.25, random_state=42
+        )
+
+        models = {
+            'DecisionTree': DecisionTreeClassifier(random_state=42),
+            'RandomForest': RandomForestClassifier(n_estimators=100, random_state=42),
+            'GradientBoosting': GradientBoostingClassifier(n_estimators=100, random_state=42)
+        }
+
+        ordinal_results = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            results = {
+                'model': name,
+                'type': 'ordinal',
+                'y_test': y_test.tolist(),
+                'y_pred': y_pred.tolist(),
+                'accuracy': accuracy_score(y_test, y_pred),
+                'precision_macro': precision_score(y_test, y_pred, average='macro'),
+                'recall_macro': recall_score(y_test, y_pred, average='macro'),
+                'f1_macro': f1_score(y_test, y_pred, average='macro'),
+                'mse': mean_squared_error(y_test, y_pred),
+                'r2': r2_score(y_test, y_pred),
+                'confusion_matrix': confusion_matrix(y_test, y_pred).tolist()
+            }
+            ordinal_results[name] = results
+            print(f"{name}: Accuracy={results['accuracy']:.4f}, F1={results['f1_macro']:.4f}, MSE={results['mse']:.4f}")
+
+            if hasattr(model, 'feature_importances_'):
+                results['feature_importances'] = model.feature_importances_.tolist()
+            self.models[f'ordinal_{name}'] = model
+
+        self.results['ordinal'] = ordinal_results
+        return ordinal_results
+
+    def train_regression(self):
+        """
+        Modelo de regresión: predicción de 'final_grade' (0.0 a 1.0).
+
+        Algoritmos:
+          - LinearRegression: modelo lineal base
+          - RandomForestRegressor: ensemble no lineal
+          - KNNRegressor: basado en vecinos cercanos
+
+        Métricas: MSE (Error Cuadrático Medio), R² (Coeficiente de Determinación)
+        """
+        print("\n========== REGRESIÓN: Nota Final ==========")
+        y = self.y_dict.get('final_grade', None)
+        if y is None:
+            print("final_grade no encontrado, saltando...")
+            return {}
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, y, test_size=0.25, random_state=42
+        )
+
+        models = {
+            'LinearRegression': LinearRegression(),
+            'RandomForestRegressor': RandomForestRegressor(n_estimators=100, random_state=42),
+            'KNN': KNeighborsRegressor(n_neighbors=5)
+        }
+
+        regression_results = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+
+            results = {
+                'model': name,
+                'type': 'regression',
+                'y_test': y_test.tolist(),
+                'y_pred': y_pred.tolist(),
+                'mse': mean_squared_error(y_test, y_pred),
+                'r2': r2_score(y_test, y_pred),
+            }
+            regression_results[name] = results
+            print(f"{name}: MSE={results['mse']:.6f}, R²={results['r2']:.4f}")
+
+            if hasattr(model, 'feature_importances_'):
+                results['feature_importances'] = model.feature_importances_.tolist()
+            elif hasattr(model, 'coef_'):
+                coefs = model.coef_
+                results['feature_importances'] = coefs.tolist() if len(coefs.shape) == 1 else coefs[0].tolist()
+            self.models[f'regression_{name}'] = model
+
+        self.results['regression'] = regression_results
+        return regression_results
+
+    def train_kongo_experiment(self):
+        """
+        Modelo específico para el experimento Kongo.
+
+        Target binario: ¿mejoró el estudiante post-intervención?
+          (kongo_post_test > kongo_pre_test)
+
+        Algoritmos:
+          - LogisticRegression: interpretable
+          - RandomForest: robusto
+          - SVC: SVM con kernel, captura fronteras complejas
+        """
+        print("\n========== EXPERIMENTO KONGO: ¿Mejoró post-test? ==========")
+        if 'kongo_pre_test' not in self.X.columns:
+            print("kongo_pre_test no disponible")
+            return {}
+
+        imp = (self.y_dict.get('kongo_post_test', pd.Series([0]*len(self.X))) - self.X['kongo_pre_test'] > 0).astype(int)
+        X_train, X_test, y_train, y_test = train_test_split(
+            self.X, imp, test_size=0.25, random_state=42
+        )
+
+        models = {
+            'LogisticRegression': LogisticRegression(max_iter=1000, random_state=42),
+            'RandomForest': RandomForestClassifier(n_estimators=100, random_state=42),
+            'SVC': SVC(probability=True, random_state=42)
+        }
+
+        kongo_results = {}
+        for name, model in models.items():
+            model.fit(X_train, y_train)
+            y_pred = model.predict(X_test)
+            y_proba = model.predict_proba(X_test)[:, 1] if hasattr(model, 'predict_proba') else None
+
+            tn, fp, fn, tp = confusion_matrix(y_test, y_pred).ravel()
+            mse_val = mean_squared_error(y_test, y_pred)
+            r2_val = r2_score(y_test, y_pred)
+            results = {
+                'model': name,
+                'type': 'kongo_binary',
+                'y_test': y_test.tolist(),
+                'y_pred': y_pred.tolist(),
+                'accuracy': accuracy_score(y_test, y_pred),
+                'precision_macro': precision_score(y_test, y_pred, average='macro'),
+                'recall_macro': recall_score(y_test, y_pred, average='macro'),
+                'f1_macro': f1_score(y_test, y_pred, average='macro'),
+                'roc_auc': roc_auc_score(y_test, y_proba) if y_proba is not None else None,
+                'mse': mse_val,
+                'r2': r2_val,
+                'msePI2': mse_val,
+                'r2PI2': r2_val,
+                'TP': int(tp), 'FP': int(fp), 'TN': int(tn), 'FN': int(fn),
+                'f1_score': f1_score(y_test, y_pred)
+            }
+            kongo_results[name] = results
+            print(f"{name}: Accuracy={results['accuracy']:.4f}, F1={results['f1_macro']:.4f}, AUC={results.get('roc_auc', 'N/A')}")
+
+            if hasattr(model, 'feature_importances_'):
+                results['feature_importances'] = model.feature_importances_.tolist()
+            elif hasattr(model, 'coef_'):
+                results['feature_importances'] = model.coef_[0].tolist()
+            self.models[f'kongo_{name}'] = model
+
+        self.results['kongo'] = kongo_results
+        return kongo_results
+
+    def run_unsupervised(self):
+        """
+        Análisis no supervisado con KMeans clustering.
+
+        Segmenta estudiantes en 3 clusters. Evalúa con:
+          - Inercia (suma de distancias intra-cluster)
+          - Silhouette Score (cohesión vs separación)
+        """
+        print("\n========== NO SUPERVISADO: KMeans Clustering ==========")
+        kmeans = KMeans(n_clusters=3, random_state=42)
+        clusters = kmeans.fit_predict(self.X)
+        sil = silhouette_score(self.X, clusters)
+        self.results['unsupervised'] = {
+            'clusters': clusters.tolist(),
+            'inertia': kmeans.inertia_,
+            'silhouette_score': sil
+        }
+        print(f"Inercia KMeans: {kmeans.inertia_:.2f}")
+        print(f"Silhouette Score: {sil:.4f}")
+        return clusters
+
+    def save_predictions_csv(self):
+        """
+        Exporta predicciones a CSV: cada modelo produce un archivo
+        con las columnas y_test (real) y y_pred (predicho).
+
+        Archivos generados (ejemplos):
+          - binary_LogisticRegression_predictions.csv
+          - ordinal_RandomForest_predictions.csv
+          - regression_LinearRegression_predictions.csv
+          - kongo_SVC_predictions.csv
+        """
+        print("\n========== GUARDANDO PREDICCIONES CSV ==========")
+        for result_type, models_dict in self.results.items():
+            if isinstance(models_dict, dict):
+                for model_name, results in models_dict.items():
+                    if isinstance(results, dict) and 'y_pred' in results and 'type' in results:
+                        fname = f"{result_type}_{model_name}_predictions.csv"
+                        y_test_list = results.get('y_test', [])
+                        y_pred_list = results['y_pred']
+                        min_len = min(len(y_test_list), len(y_pred_list))
+                        if min_len > 0:
+                            df_out = pd.DataFrame({
+                                'y_test': y_test_list[:min_len],
+                                'y_pred': y_pred_list[:min_len]
+                            })
+                            df_out.to_csv(os.path.join(self.output_dir, fname), index=False)
+                            print(f"  Guardado {fname} ({len(df_out)} filas)")
+
+    def save_metrics_summary(self):
+        """
+        Exporta un resumen de todas las métricas a CSV.
+
+        Métricas incluidas:
+          - accuracy, precision_macro, recall_macro, f1_macro
+          - roc_auc (solo clasificación binaria)
+          - mse, r2 (solo regresión y ordinal)
+          - f1_score (binaria)
+          - TP, FP, TN, FN (binaria)
+        """
+        rows = []
+        for model_type, models_dict in self.results.items():
+            if isinstance(models_dict, dict):
+                for model_name, results in models_dict.items():
+                    if not isinstance(results, dict):
+                        continue
+                    row = {'model_name': model_name, 'type': results.get('type', model_type)}
+                    for key in ['accuracy', 'precision_macro', 'recall_macro', 'f1_macro',
+                                'roc_auc', 'mse', 'r2', 'msePI2', 'r2PI2', 'f1_score']:
+                        row[key] = results.get(key, None)
+                    row['TP'] = results.get('TP', None)
+                    row['FP'] = results.get('FP', None)
+                    row['TN'] = results.get('TN', None)
+                    row['FN'] = results.get('FN', None)
+                    rows.append(row)
+
+        df_metrics = pd.DataFrame(rows)
+        df_metrics.to_csv(os.path.join(self.output_dir, 'metrics_summary.csv'), index=False)
+        print(f"\nResumen de métricas guardado: {len(rows)} modelos")
+        print(df_metrics.to_string())
+        return df_metrics
+
+    def plot_feature_importance(self, feature_names, top_n=10):
+        """
+        Genera gráficos de importancia de características para cada modelo
+        basado en árboles o coeficientes.
+
+        Interpretación:
+          - Modelos lineales: valores absolutos de coeficientes
+          - Modelos de árboles: reducción de impureza promedio
+          - Más alto = más influyente en la predicción
+        """
+        print("\n========== IMPORTANCIA DE CARACTERÍSTICAS ==========")
+        for key, model in self.models.items():
+            if hasattr(model, 'feature_importances_') and model.feature_importances_ is not None:
+                fi = model.feature_importances_
+                if len(fi) == len(feature_names):
+                    idx = np.argsort(fi)[-top_n:]
+                    plt.figure(figsize=(10, 6))
+                    plt.barh(range(top_n), fi[idx])
+                    plt.yticks(range(top_n), [feature_names[i] for i in idx])
+                    plt.xlabel('Importancia')
+                    plt.title(f'Importancia de Variables - {key}')
+                    plt.tight_layout()
+                    plt.savefig(os.path.join(self.output_dir, 'figures', f'feature_importance_{key}.png'))
+                    plt.close()
+                    print(f"  {key}: Top variables guardadas")
+
+    def plot_confusion_matrices(self):
+        """
+        Genera matrices de confusión para modelos de clasificación binaria.
+
+        Las matrices de confusión muestran:
+          - TP (True Positives): aciertos positivos
+          - FP (False Positives): falsas alarmas
+          - TN (True Negatives): aciertos negativos
+          - FN (False Negatives): omisiones
+        """
+        print("\n========== MATRICES DE CONFUSIÓN ==========")
+        for result_type, models_dict in self.results.items():
+            if isinstance(models_dict, dict):
+                for model_name, results in models_dict.items():
+                    if isinstance(results, dict) and 'y_test' in results and 'y_pred' in results:
+                        if len(results['y_test']) > 0 and len(results['y_pred']) > 0:
+                            if len(np.unique(results['y_test'])) <= 2 and len(np.unique(results['y_pred'])) <= 2:
+                                fig, ax = plt.subplots(figsize=(6, 5))
+                                ConfusionMatrixDisplay.from_predictions(
+                                    results['y_test'], results['y_pred'], ax=ax, cmap='Blues'
+                                )
+                                plt.title(f'Matriz de Confusión - {result_type}_{model_name}')
+                                plt.tight_layout()
+                                plt.savefig(os.path.join(self.output_dir, 'figures', f'cm_{result_type}_{model_name}.png'))
+                                plt.close()
+                                print(f"  Matriz de confusión guardada para {result_type}_{model_name}")
+
+    def run_all_training(self, feature_names):
+        """
+        Ejecuta todos los entrenamientos y exportaciones en secuencia.
+
+        Orden:
+          1. Clasificación binaria (passed)
+          2. Clasificación ordinal (performance_tier)
+          3. Regresión (final_grade)
+          4. Experimento Kongo
+          5. Clustering no supervisado
+          6. Exportar predicciones CSV
+          7. Exportar resumen de métricas CSV
+          8. Gráficos de importancia de variables
+          9. Matrices de confusión
+        """
+        self.train_binary()
+        self.train_ordinal()
+        self.train_regression()
+        self.train_kongo_experiment()
+        self.run_unsupervised()
+        self.save_predictions_csv()
+        self.save_metrics_summary()
+        self.plot_feature_importance(feature_names)
+        self.plot_confusion_matrices()
+        print("\n========== TODOS LOS MODELOS ENTRENADOS ==========")
+        return self.results
+
