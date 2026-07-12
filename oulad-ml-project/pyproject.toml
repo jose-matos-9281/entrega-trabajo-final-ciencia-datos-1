@@ -8,8 +8,11 @@ authors = [
 ]
 requires-python = ">=3.12"
 dependencies = [
+    "duckdb>=1.5.4",
     "matplotlib>=3.11.0",
+    "openpyxl>=3.1.5",
     "pandas>=3.0.3",
+    "python-dotenv>=1.2.2",
     "scikit-learn>=1.9.0",
     "seaborn>=0.13.2",
 ]
@@ -17,9 +20,10 @@ dependencies = [
 [project.scripts]
 create-data = "oulad_ml_project.data_generator:main"
 ml_pipeline = "oulad_ml_project.ml_pipeline:main"
+train-inference-model = "oulad_ml_project.inference:main_train"
+predict-excel = "oulad_ml_project.inference:main_predict"
 
 [build-system]
 requires = ["uv_build>=0.11.28,<0.12.0"]
 build-backend = "uv_build"
-
 

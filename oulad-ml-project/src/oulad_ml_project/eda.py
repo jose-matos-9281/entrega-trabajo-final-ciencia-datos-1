@@ -1,6 +1,6 @@
 """
 =============================================================================
- PIPELINE COMPLETO DE MACHINE LEARNING - OULAD + Experimento Kongo
+  PIPELINE COMPLETO DE MACHINE LEARNING - OULAD
 =============================================================================
  Proyecto Final Colaborativo - Machine Learning sobre OULAD
  Curso: Data Analysis | Fecha: Julio 2026
@@ -131,15 +131,15 @@ class ExploratoryDataAnalysis:
         """
         Análisis bivariado con scatter plots y box plots.
 
-        Scatter plots: 6 gráficos de dispersión contra score
-        Box plots: score segmentado por gender, age_band, education_level
+        Scatter plots: 6 gráficos de dispersión contra weighted_assessment_score
+        Box plots: weighted_assessment_score segmentado por variables demográficas
 
         Genera:
           - output/figures/bivariate_scatter.png
           - output/figures/bivariate_boxplots.png
         """
         print("\n========== ANÁLISIS BIVARIADO ==========")
-        target = "score"
+        target = "weighted_assessment_score"
         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
         axes = axes.flatten()
         biv_cols = [c for c in self.numeric_cols if c != target][:6]
@@ -153,9 +153,9 @@ class ExploratoryDataAnalysis:
 
         # Box plots para variables categóricas clave
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        for i, col in enumerate(["gender", "age_band", "education_level"]):
-            self.df.boxplot(column="score", by=col, ax=axes[i])
-            axes[i].set_title(f"score por {col}")
+        for i, col in enumerate(["gender", "age_band", "highest_education"]):
+            self.df.boxplot(column=target, by=col, ax=axes[i])
+            axes[i].set_title(f"{target} por {col}")
         plt.suptitle("")
         plt.tight_layout()
         plt.savefig(self.fig_dir / "bivariate_boxplots.png")

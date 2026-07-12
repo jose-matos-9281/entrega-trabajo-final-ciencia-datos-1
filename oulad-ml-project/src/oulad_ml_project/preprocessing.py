@@ -1,6 +1,6 @@
 """
 =============================================================================
- PIPELINE COMPLETO DE MACHINE LEARNING - OULAD + Experimento Kongo
+ PIPELINE COMPLETO DE MACHINE LEARNING - OULAD
 =============================================================================
  Proyecto Final Colaborativo - Machine Learning sobre OULAD
  Curso: Data Analysis | Fecha: Julio 2026
@@ -47,9 +47,7 @@ class DataPreprocessor:
       - Prevención de fuga de datos (data leakage)
 
     Estrategia de imputación:
-      - kongo_pre_test/kongo_post_test: 0 (no participaron en experimento)
-      - internet_speed_mbps: mediana del grupo
-      - Numéricas restantes: mediana
+       - Numéricas restantes: mediana
       - Categóricas: moda (valor más frecuente)
     """
 
@@ -63,31 +61,22 @@ class DataPreprocessor:
         Maneja los valores faltantes con estrategias justificadas.
 
         Justificación:
-          - Los estudiantes no-Kongo no tienen datos del experimento,
-            por lo que se imputa kongo_pre_test/kongo_post_test con 0
-          - internet_speed_mbps se imputa con la mediana del grupo Kongo
-          - Variables numéricas generales: mediana (robusta a outliers)
+           - Variables numéricas generales: mediana (robusta a outliers)
           - Variables categóricas: moda (valor más representativo)
         """
         num_cols = self.df.select_dtypes(include=[np.number]).columns
         cat_cols = self.df.select_dtypes(include=['object', 'category']).columns
 
-        # Estudiantes no-Kongo: no participaron, valor 0
-        if 'kongo_pre_test' in self.df.columns:
-            self.df['kongo_pre_test'] = self.df['kongo_pre_test'].fillna(0)
-        if 'kongo_post_test' in self.df.columns:
-            self.df['kongo_post_test'] = self.df['kongo_post_test'].fillna(0)
-        if 'internet_speed_mbps' in self.df.columns:
-            self.df['internet_speed_mbps'] = self.df['internet_speed_mbps'].fillna(self.df['internet_speed_mbps'].median())
+        target_columns = {'passed', 'performance_tier', 'weighted_assessment_score'}
 
-        # Numéricas restantes: imputación con mediana
+        # Only features are imputed. Targets retain missingness from the source.
         for col in num_cols:
-            if self.df[col].isna().sum() > 0:
+            if col not in target_columns and self.df[col].isna().sum() > 0:
                 self.df[col] = self.df[col].fillna(self.df[col].median())
 
         # Categóricas restantes: imputación con moda
         for col in cat_cols:
-            if self.df[col].isna().sum() > 0:
+            if col not in target_columns and self.df[col].isna().sum() > 0:
                 self.df[col] = self.df[col].fillna(self.df[col].mode()[0])
 
         return self.df
@@ -97,20 +86,16 @@ class DataPreprocessor:
         Codifica variables ordinales y nominales.
 
         Ordinales (orden conocidas):
-          - education_level: No Formal → Lower Secondary → Upper Secondary → Bachelor → Master
+          - highest_education (legacy: education_level): No Formal → Lower Secondary → Upper Secondary → Bachelor → Master
           - age_band: 0-35 → 35-55 → 55-
-          - performance_tier: Fail → Low → Medium → High
-
-        Especial:
-          - digital_access: low=0, medium=1, high=2, unknown=-1
 
         Nominales (LabelEncoder):
           - gender, region, code_module, code_presentation
         """
         ordinal_cols = {
+            'highest_education': ['No Formal', 'Lower Secondary', 'Upper Secondary', 'Bachelor', 'Master'],
             'education_level': ['No Formal', 'Lower Secondary', 'Upper Secondary', 'Bachelor', 'Master'],
-            'age_band': ['0-35', '35-55', '55-'],
-            'performance_tier': ['Fail', 'Low', 'Medium', 'High']
+            'age_band': ['0-35', '35-55', '55-']
         }
         for col, categories in ordinal_cols.items():
             if col in self.df.columns:
@@ -121,11 +106,6 @@ class DataPreprocessor:
                 ).codes
                 self.df[col + '_encoded'] = self.df[col + '_encoded'].fillna(0).astype(int)
                 self.ordinal_mappings[col] = {c: i for i, c in enumerate(categories)}
-
-        # digital_access tiene 'unknown' para no-Kongo → mapeo especial
-        if 'digital_access' in self.df.columns:
-            da_map = {'low': 0, 'medium': 1, 'high': 2, 'unknown': -1}
-            self.df['digital_access_encoded'] = self.df['digital_access'].map(da_map).fillna(-1).astype(int)
 
         # LabelEncoder para categóricas nominales restantes
         for col in self.df.select_dtypes(include=['object', 'category']).columns:
@@ -142,8 +122,7 @@ class DataPreprocessor:
         Prepara las matrices de características (X) y targets (y).
 
         Previene fuga de datos (data leakage) excluyendo:
-          - score (determina el target)
-          - performance_tier y performance_tier_encoded (derivados de score)
+           - target columns and enrollment identifiers
           - id_student (sin valor predictivo)
 
         Args:
@@ -158,9 +137,7 @@ class DataPreprocessor:
         if exclude_cols is None:
             exclude_cols = ['id_student', 'code_presentation']
         exclude_cols = exclude_cols + target_cols
-        exclude_cols += ['score', 'performance_tier', 'performance_tier_encoded']
-
-        exclude_cols += ['digital_access', 'code_module', 'code_presentation', 'is_kongo_enc', 'treatment_enc']
+        exclude_cols += ['code_module', 'code_presentation']
 
         feature_cols = [c for c in self.df.columns
                        if c not in exclude_cols
@@ -175,4 +152,3 @@ class DataPreprocessor:
             if t in self.df.columns:
                 y_sets[t] = self.df[t]
         return X, y_sets, feature_cols
-

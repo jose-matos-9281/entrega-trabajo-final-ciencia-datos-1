@@ -1,6 +1,6 @@
 """
 =============================================================================
- PIPELINE COMPLETO DE MACHINE LEARNING - OULAD + Experimento Kongo
+ PIPELINE COMPLETO DE MACHINE LEARNING - OULAD
 =============================================================================
  Proyecto Final Colaborativo - Machine Learning sobre OULAD
  Curso: Data Analysis | Fecha: Julio 2026
@@ -61,7 +61,7 @@ class MLPipeline:
     def load_data(self):
         """Carga el dataset desde el archivo CSV."""
         print("=" * 60)
-        print("PROYECTO OULAD + KONGO - MACHINE LEARNING")
+        print("PROYECTO OULAD - MACHINE LEARNING")
         print("=" * 60)
         self.df = pd.read_csv(self.data_path)
         print(f"\n[OBTAIN] Datos cargados: {self.df.shape[0]} filas, {self.df.shape[1]} columnas")
@@ -85,18 +85,10 @@ class MLPipeline:
         """
         Prepara los datos para el modelado (features + targets).
 
-        Mantiene kongo_pre_test y kongo_post_test como features para
-        el modelo específico del experimento Kongo.
+        Uses only the real OULAD artifact contract.
         """
-        target_cols = ['passed', 'performance_tier', 'final_grade']
+        target_cols = ['passed', 'performance_tier', 'weighted_assessment_score']
         X, y_sets, feature_cols = self.preprocessor.prepare_features(target_cols)
-        for col in ['kongo_pre_test', 'kongo_post_test']:
-            if col in self.preprocessor.df.columns:
-                X[col] = self.preprocessor.df[col].values
-                if col not in feature_cols:
-                    feature_cols.append(col)
-        y_sets['kongo_pre_test'] = self.preprocessor.df['kongo_pre_test']
-        y_sets['kongo_post_test'] = self.preprocessor.df['kongo_post_test']
         print(f"[MODEL] Características seleccionadas: {len(feature_cols)}")
         print(f"  Features: {feature_cols}")
         return X, y_sets, feature_cols
@@ -104,7 +96,7 @@ class MLPipeline:
     def train_models(self, X, y_sets, feature_cols):
         """Entrena todos los modelos y guarda resultados."""
         print("\n[MODEL] Entrenando modelos...")
-        self.trainer = ModelTrainer(X, y_sets, self.output_dir)
+        self.trainer = ModelTrainer(X, y_sets, self.output_dir, self.preprocessor.df['id_student'])
         self.results = self.trainer.run_all_training(feature_cols)
         return self.results
 
