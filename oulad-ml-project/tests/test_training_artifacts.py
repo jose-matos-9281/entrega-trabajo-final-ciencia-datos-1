@@ -35,6 +35,7 @@ class TrainingArtifactsTest(unittest.TestCase):
                 "code_presentation": ["2014J", "2013J"],
                 "total_clicks": [8, 4],
                 "has_vle_activity": [1, 1],
+                "final_result": ["Pass", "Fail"],
                 "passed": [1, 0],
                 "performance_tier": [2, 0],
                 "weighted_assessment_score": [72.5, 35.0],
@@ -107,6 +108,7 @@ class TrainingArtifactsTest(unittest.TestCase):
         self.assertEqual(frame.loc[0, "vle_events"], 1)
         self.assertEqual(frame.loc[0, "vle_sites"], 1)
         self.assertEqual(frame.loc[0, "has_vle_activity"], 1)
+        self.assertEqual(frame.loc[0, "final_result"], "Pass")
         self.assertEqual(frame.loc[0, "passed"], 1)
         self.assertNotIn("resultado_final", frame.columns)
         self.assertEqual(frame["id_student"].tolist(), [1])
@@ -152,6 +154,7 @@ class TrainingArtifactsTest(unittest.TestCase):
             {
                 "id_student": [1, 2],
                 "total_clicks": [None, 4],
+                "final_result": [None, "Pass"],
                 "passed": [1, 0],
                 "performance_tier": [2, 0],
                 "weighted_assessment_score": [None, 80.0],
@@ -161,6 +164,7 @@ class TrainingArtifactsTest(unittest.TestCase):
         processed = DataPreprocessor(frame).handle_missing()
 
         self.assertEqual(processed.loc[0, "total_clicks"], 4)
+        self.assertTrue(pd.isna(processed.loc[0, "final_result"]))
         self.assertTrue(pd.isna(processed.loc[0, "weighted_assessment_score"]))
 
     def test_grouped_splits_keep_students_disjoint_and_exclude_identity_features(self):

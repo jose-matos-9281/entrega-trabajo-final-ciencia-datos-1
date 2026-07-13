@@ -6,7 +6,7 @@ This project trains leakage-safe OULAD enrollment models from the canonical Neon
 
 1. Install the locked environment with `uv sync`.
 2. Generate canonical artifacts from Neon at one cutoff day.
-3. Persist the inference preprocessing and model artifacts.
+3. Evaluate risk-model candidates and persist the selected champion bundle.
 4. Predict from the Excel workbook using the identical cutoff day.
 
 ```bash
@@ -23,7 +23,7 @@ uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cuto
 | Neon/Postgres | Canonical OULAD source queried through DuckDB with `READ_ONLY`. |
 | `sql/oulad_training_mart.sql` | Builds one enrollment row per `id_student`, `code_module`, and `code_presentation`. |
 | `create-data` | Writes deterministic training artifacts and cutoff metadata. |
-| `train-inference-model` | Fits and persists a `OneHotEncoder(handle_unknown="ignore")` plus binary `passed` classifier. |
+| `train-inference-model` | Evaluates Logistic Regression, Random Forest, and Gradient Boosting pipelines, then persists the risk-recall champion. |
 | `predict-excel` | Maps approved Excel sheets to the same enrollment feature contract and writes a new prediction CSV. |
 
 The three enrollment key columns are metadata, not model features. In particular, `id_student` is never a feature. `oulad_kongo_full.csv` is a temporary compatibility filename only; it contains OULAD data and no Kongo columns.
@@ -67,7 +67,9 @@ This writes:
 uv run train-inference-model --training-data data/oulad_kongo_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
 ```
 
-The command persists `artifacts/passed_model.joblib` and `artifacts/inference_manifest.json`. The manifest pins the cutoff and exact raw feature list. Prediction refuses an artifact whose cutoff or feature contract differs from the requested run.
+The command performs a grouped split by `id_student` before fitting any imputer, encoder, or scaler. It evaluates all candidates with `passed=0` as the risk class and selects the champion by `risk_recall`; risk precision, risk F1, ROC-AUC, and general metrics remain guardrails rather than a substitute for the operational objective.
+
+It persists `artifacts/passed_model.joblib`, `artifacts/inference_manifest.json`, `artifacts/training_report.json`, `artifacts/training_metrics.csv`, and `artifacts/evaluation_predictions.csv`. The serialized bundle is the evaluated champion, fit only on the training partition. The manifest pins the cutoff and versioned raw feature-contract fingerprint. Prediction refuses an artifact whose cutoff or feature contract differs from the requested run.
 
 ## Predict From Excel
 
@@ -75,7 +77,7 @@ The command persists `artifacts/passed_model.joblib` and `artifacts/inference_ma
 uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cutoff-day 30 --output output/excel_predictions.csv
 ```
 
-The source workbook remains unchanged. The output contains the three enrollment keys, cutoff, model target, class prediction, probability, `oov_categorical_fields`, and `oov_key_fields`. `none` in an OOV field means no value was unseen in training. Unknown modules and presentations remain metadata, never model features, and are reported in `oov_key_fields`; unknown regions and other categorical feature values use the persisted encoder with unknown categories ignored.
+The source workbook remains unchanged. The output contains the three enrollment keys, cutoff, model target, class prediction, probability, `oov_categorical_fields`, and `oov_key_fields`. A sibling `<output>.inference_report.json` records the champion, contract, row count, OOV counts, missing values passed to imputers, probability distribution, and drift warnings. `none` in an OOV field means no value was unseen in training. Unknown modules and presentations remain metadata, never model features, and are reported in `oov_key_fields`; unknown regions and other categorical feature values use the persisted encoder with unknown categories ignored.
 
 The adapter reads only `StudentInfo`, `Registration`, `VLE_clickStream`, and `cursos`. It intentionally does not load assessment sheets, so `score`, `final_result`, `date_submitted`, assessment plans, and other outcomes cannot enter inference.
 
@@ -84,7 +86,7 @@ The adapter reads only `StudentInfo`, `Registration`, `VLE_clickStream`, and `cu
 The training mart includes enrollments registered on or before `cutoff_day` and aggregates VLE events where `date <= cutoff_day`. The Excel adapter applies the same rule.
 
 - Assessment scores and final outcomes are targets or post-cutoff information and are excluded.
-- The existing grouped split by `id_student` is retained for evaluation; do not replace it with a row split.
+- The grouped split by `id_student` occurs before preprocessing; do not replace it with a row split or pre-split feature transformation.
 - The adapter rejects missing required fields, duplicate enrollment keys, unmatched enrollment coverage, invalid numeric values, negative clicks, post-cutoff registrations, ambiguous blank VLE modules, and VLE activity without a known enrollment.
 - A blank VLE module is resolved only when student and presentation identify exactly one enrollment. This is a deterministic relational join, not imputation.
 
@@ -104,7 +106,7 @@ RUN_NEON_INTEGRATION=1 uv run python -m unittest discover -s tests -p test_train
 
 ## Limitations And Troubleshooting
 
-The local Excel contains a different population and normalized sheet/column names. It is valid for inference only, not for fitting, scoring, or replacing the 32k-enrollment Neon training mart. Its current `StudentInfo` sheet has missing `imd_band` and `age_band` values, so the strict command correctly rejects it until the source is completed. New modules, presentations, regions, or other categorical values can cause domain shift even though encoder handling prevents runtime failures.
+The local Excel contains a different population and normalized sheet/column names. It is valid for inference only, not for fitting, scoring, or replacing the 32k-enrollment Neon training mart. Missing optional raw features are handled by the persisted training-only imputers. New modules, presentations, regions, or other categorical values can cause domain shift even though encoder handling prevents runtime failures; inspect the inference report rather than treating a successful prediction as evidence of quality.
 
 | Symptom | Resolution |
 |---|---|

@@ -33,6 +33,7 @@ def sample_mart() -> pd.DataFrame:
                 "vle_events": index * 2,
                 "vle_sites": index + 1,
                 "has_vle_activity": int(index > 0),
+                "final_result": "Pass" if index >= 4 else "Fail",
                 "passed": int(index >= 4),
                 "performance_tier": index % 4,
                 "weighted_assessment_score": None if index in {0, 1, 4} else 50 + index,

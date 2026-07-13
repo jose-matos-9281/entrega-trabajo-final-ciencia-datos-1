@@ -11,7 +11,7 @@ from dotenv import load_dotenv
 
 
 KEY_COLUMNS = ["id_student", "code_module", "code_presentation"]
-TARGET_COLUMNS = ["passed", "performance_tier", "weighted_assessment_score"]
+TARGET_COLUMNS = ["final_result", "passed", "performance_tier", "weighted_assessment_score"]
 
 PROJECT_DIR = Path(__file__).resolve().parents[2]
 SQL_PATH = PROJECT_DIR / "sql" / "oulad_training_mart.sql"

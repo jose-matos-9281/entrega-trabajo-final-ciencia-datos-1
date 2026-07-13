@@ -346,11 +346,11 @@ class ExploratoryDataAnalysis:
             "## Apéndice: archivos generados",
             "",
         ]
-        lines.extend(f"- `{path.relative_to(self.output_dir).as_posix()}`" for path in sorted(self.generated_files))
-        lines.append("- `eda_report.md`")
+        # lines.extend(f"- `{path.relative_to(self.output_dir).as_posix()}`" for path in sorted(self.generated_files))
+        # lines.append("- `eda_report.md`")
         report = self.output_dir / "eda_report.md"
         report.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        #self.generated_files.append(report)
+        self.generated_files.append(report)
         return report
 
     def run_all(self) -> list[Path]:

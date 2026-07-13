@@ -24,7 +24,6 @@
 
 import numpy as np
 import pandas as pd
-from sklearn.preprocessing import LabelEncoder
 
 import warnings
 warnings.filterwarnings('ignore')
@@ -43,7 +42,7 @@ class DataPreprocessor:
     Según la rúbrica (1 pt):
       - Identificación y tratamiento de valores faltantes (justificado)
       - Codificación de variables ordinales con OrdinalEncoder
-      - Codificación de variables categóricas nominales con LabelEncoder
+      - Explicit ordinal mappings; nominal values remain raw for training pipelines
       - Prevención de fuga de datos (data leakage)
 
     Estrategia de imputación:
@@ -54,7 +53,6 @@ class DataPreprocessor:
     def __init__(self, df):
         self.df = df.copy()
         self.ordinal_mappings = {}
-        self.label_encoders = {}
 
     def handle_missing(self):
         """
@@ -67,7 +65,7 @@ class DataPreprocessor:
         num_cols = self.df.select_dtypes(include=[np.number]).columns
         cat_cols = self.df.select_dtypes(include=['object', 'category']).columns
 
-        target_columns = {'passed', 'performance_tier', 'weighted_assessment_score'}
+        target_columns = {'final_result', 'passed', 'performance_tier', 'weighted_assessment_score'}
 
         # Only features are imputed. Targets retain missingness from the source.
         for col in num_cols:
@@ -83,14 +81,10 @@ class DataPreprocessor:
 
     def encode_ordinal(self):
         """
-        Codifica variables ordinales y nominales.
+        Encode only variables with an explicit, valid ordinal order.
 
-        Ordinales (orden conocidas):
-          - highest_education (legacy: education_level): No Formal → Lower Secondary → Upper Secondary → Bachelor → Master
-          - age_band: 0-35 → 35-55 → 55-
-
-        Nominales (LabelEncoder):
-          - gender, region, code_module, code_presentation
+        Nominal features remain raw. Production pipelines use one-hot encoding
+        fitted on the training partition rather than arbitrary label integers.
         """
         ordinal_cols = {
             'highest_education': ['No Formal', 'Lower Secondary', 'Upper Secondary', 'Bachelor', 'Master'],
@@ -106,14 +100,6 @@ class DataPreprocessor:
                 ).codes
                 self.df[col + '_encoded'] = self.df[col + '_encoded'].fillna(0).astype(int)
                 self.ordinal_mappings[col] = {c: i for i, c in enumerate(categories)}
-
-        # LabelEncoder para categóricas nominales restantes
-        for col in self.df.select_dtypes(include=['object', 'category']).columns:
-            if col not in ordinal_cols and col not in ['id_student']:
-                le = LabelEncoder()
-                non_null = self.df[col].notna()
-                self.df.loc[non_null, col + '_enc'] = le.fit_transform(self.df.loc[non_null, col])
-                self.label_encoders[col] = le
 
         return self.df
 

@@ -3,8 +3,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import joblib
 import pandas as pd
+from sklearn.model_selection import GroupShuffleSplit
 
+from oulad_ml_project.feature_contract import CONTRACT_VERSION, NUMERIC_FEATURES
 from oulad_ml_project.inference import (
     FEATURE_COLUMNS,
     build_excel_inference_frame,
@@ -153,6 +156,8 @@ class ExcelInferenceTest(unittest.TestCase):
                     "passed": [0, 1, 0, 1],
                 }
             )
+            training = pd.concat([training, training.assign(id_student=lambda rows: rows["id_student"] + 4)], ignore_index=True)
+            training.loc[5, "passed"] = 0  # GroupShuffleSplit's holdout must contain both classes.
             training_path = root / "training.csv"
             metadata_path = root / "metadata.json"
             workbook = root / "input.xlsx"
@@ -164,6 +169,7 @@ class ExcelInferenceTest(unittest.TestCase):
             frame = build_excel_inference_frame(workbook, 30)
             predict_excel(workbook, root / "artifacts", output, 30)
             predictions = pd.read_csv(output)
+            report = json.loads(output.with_suffix(".inference_report.json").read_text(encoding="utf-8"))
 
         self.assertTrue(
             frame[["imd_band", "age_band", "num_of_prev_attempts", "studied_credits"]].isna().any().all()
@@ -172,3 +178,72 @@ class ExcelInferenceTest(unittest.TestCase):
         self.assertIn("region", predictions.loc[1, "oov_categorical_fields"])
         self.assertEqual(predictions.loc[0, "oov_key_fields"], "none")
         self.assertTrue(predictions["probability_passed"].between(0, 1).all())
+        self.assertEqual(report["contract_version"], CONTRACT_VERSION)
+        self.assertEqual(report["rows"], 2)
+
+    def test_champion_bundle_uses_train_cv_and_separate_holdout_evaluation(self):
+        rows = []
+        for student in range(1, 17):
+            rows.append(
+                {
+                    "id_student": student,
+                    "code_module": "AAA" if student % 2 else "BBB",
+                    "code_presentation": "2013J" if student % 2 else "2014J",
+                    "gender": "F" if student % 2 else "M",
+                    "region": "North" if student % 3 else "South",
+                    "highest_education": "Bachelor",
+                    "imd_band": "20-30%",
+                    "disability": "N",
+                    "age_band": "0-35",
+                    "num_of_prev_attempts": student % 3,
+                    "studied_credits": 60 + student,
+                    "date_registration": -student,
+                    "course_duration_days": 100,
+                    "total_clicks": student * 10,
+                    "active_days": student,
+                    "vle_events": student,
+                    "vle_sites": 1,
+                    "has_vle_activity": 1,
+                    "passed": student % 2,
+                }
+            )
+        training = pd.DataFrame(rows)
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            training_path = root / "training.csv"
+            metadata_path = root / "metadata.json"
+            workbook = root / "input.xlsx"
+            output = root / "predictions.csv"
+            training.to_csv(training_path, index=False)
+            metadata_path.write_text(json.dumps({"cutoff_day": 30}), encoding="utf-8")
+            write_workbook(workbook)
+            paths = train_inference_model(training_path, metadata_path, root / "artifacts")
+            manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
+            report = json.loads(paths["report"].read_text(encoding="utf-8"))
+            bundle = joblib.load(paths["model"])
+            predict_excel(workbook, root / "artifacts", output, 30)
+            inference_report = json.loads(output.with_suffix(".inference_report.json").read_text(encoding="utf-8"))
+
+        _, test_positions = next(
+            GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42).split(
+                training, training["passed"], training["id_student"]
+            )
+        )
+        train_positions = training.index.difference(training.index[test_positions])
+        imputer = bundle.named_steps["preprocessor"].named_transformers_["numeric"].named_steps["imputer"]
+        total_clicks_position = list(NUMERIC_FEATURES).index("total_clicks")
+
+        self.assertEqual(manifest["champion_name"], report["champion"]["name"])
+        self.assertEqual(bundle.named_steps["classifier"].__class__.__name__, manifest["champion_name"])
+        self.assertEqual(manifest["training_rows"], len(train_positions))
+        self.assertEqual(report["selection"]["strategy"], "GroupKFold")
+        self.assertEqual(report["selection"]["rows"], len(train_positions))
+        self.assertEqual(report["selection"]["holdout_rows_used"], 0)
+        self.assertEqual(report["evaluation"]["strategy"], "GroupShuffleSplit holdout")
+        self.assertEqual(report["evaluation"]["rows"], len(test_positions))
+        self.assertIn("champion_metrics", report["evaluation"])
+        self.assertAlmostEqual(
+            imputer.statistics_[total_clicks_position], training.loc[train_positions, "total_clicks"].median()
+        )
+        self.assertEqual(inference_report["champion_name"], manifest["champion_name"])
+        self.assertEqual(inference_report["contract_version"], CONTRACT_VERSION)

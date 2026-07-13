@@ -60,6 +60,7 @@ outcomes AS (
         ec.id_estudiante AS id_student,
         ec.cd_curso AS code_module,
         ec.cd_semestre AS code_presentation,
+        ec.resultado_final AS final_result,
         CASE WHEN UPPER(ec.resultado_final) IN ('PASS', 'DISTINCTION') THEN 1 ELSE 0 END AS passed,
         CASE UPPER(ec.resultado_final)
             WHEN 'FAIL' THEN 0
@@ -76,6 +77,7 @@ SELECT
     COALESCE(vle_features.vle_events, 0) AS vle_events,
     COALESCE(vle_features.vle_sites, 0) AS vle_sites,
     CASE WHEN vle_features.id_student IS NULL THEN 0 ELSE 1 END AS has_vle_activity,
+    outcomes.final_result,
     outcomes.passed,
     outcomes.performance_tier,
     assessment_targets.weighted_assessment_score

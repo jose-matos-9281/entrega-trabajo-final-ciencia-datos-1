@@ -24,10 +24,11 @@
 
 import pandas as pd
 import warnings
+import json
 from pathlib import Path
-from .eda import ExploratoryDataAnalysis
 from .preprocessing import DataPreprocessor
 from .train_ml import ModelTrainer
+from .risk_model import train_risk_champion
 warnings.filterwarnings('ignore')
 
 # ------------------------------------------------------------
@@ -67,11 +68,6 @@ class MLPipeline:
         print(f"\n[OBTAIN] Datos cargados: {self.df.shape[0]} filas, {self.df.shape[1]} columnas")
         return self.df
 
-    def run_eda(self):
-        """Ejecuta el Análisis Exploratorio de Datos completo."""
-        print("\n[SCRUB] Ejecutando EDA...")
-        eda = ExploratoryDataAnalysis(self.df, self.data_dir, self.output_dir)
-        eda.run_all()
 
     def preprocess(self):
         """Preprocesa los datos: missing values + encoding."""
@@ -93,11 +89,14 @@ class MLPipeline:
         print(f"  Features: {feature_cols}")
         return X, y_sets, feature_cols
 
-    def train_models(self, X, y_sets, feature_cols):
-        """Entrena todos los modelos y guarda resultados."""
-        print("\n[MODEL] Entrenando modelos...")
-        self.trainer = ModelTrainer(X, y_sets, self.output_dir, self.preprocessor.df['id_student'])
-        self.results = self.trainer.run_all_training(feature_cols)
+    def train_models(self):
+        """Train, select, and persist the leakage-safe binary risk champion."""
+        metadata_path = self.data_dir / "oulad_training_metadata.json"
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        cutoff_day = metadata.get("cutoff_day")
+        print("\n[MODEL] Training risk-classifier candidates...")
+        artifacts = train_risk_champion(self.df, self.output_dir / "artifacts", cutoff_day)
+        self.results = artifacts.as_dict()
         return self.results
 
     def run(self):
@@ -110,10 +109,7 @@ class MLPipeline:
         self.load_data()
         print(f"  Distribución target (passed):\n{self.df['passed'].value_counts(normalize=True)}")
         print(f"  Distribución target (performance_tier):\n{self.df['performance_tier'].value_counts(normalize=True)}")
-        self.run_eda()
-        self.preprocess()
-        X, y_sets, feature_cols = self.prepare_model_data()
-        self.train_models(X, y_sets, feature_cols)
+        self.train_models()
         print("\n" + "=" * 60)
         print("PROYECTO COMPLETADO EXITOSAMENTE")
         print("=" * 60)

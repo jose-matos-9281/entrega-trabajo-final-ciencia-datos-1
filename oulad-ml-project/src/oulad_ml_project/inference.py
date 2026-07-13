@@ -9,39 +9,21 @@ from pathlib import Path
 
 import joblib
 import pandas as pd
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from .data_sources import KEY_COLUMNS
+from .feature_contract import (
+    CATEGORICAL_FEATURES,
+    CONTRACT_VERSION,
+    FEATURE_COLUMNS,
+    NUMERIC_FEATURES,
+    contract_fingerprint,
+    validate_raw_features,
+)
+from .risk_model import ARTIFACT_VERSION, MANIFEST_FILENAME, MODEL_FILENAME, train_risk_champion
 
 
-ARTIFACT_VERSION = 1
-MODEL_FILENAME = "passed_model.joblib"
-MANIFEST_FILENAME = "inference_manifest.json"
 REQUIRED_SHEETS = ("StudentInfo", "Registration", "VLE_clickStream", "cursos")
-CATEGORICAL_FEATURES = (
-    "gender",
-    "region",
-    "highest_education",
-    "imd_band",
-    "disability",
-    "age_band",
-)
-NUMERIC_FEATURES = (
-    "num_of_prev_attempts",
-    "studied_credits",
-    "date_registration",
-    "course_duration_days",
-    "total_clicks",
-    "active_days",
-    "vle_events",
-    "vle_sites",
-    "has_vle_activity",
-)
-FEATURE_COLUMNS = CATEGORICAL_FEATURES + NUMERIC_FEATURES
 
 
 def _require_columns(frame: pd.DataFrame, columns: set[str], source: str) -> None:
@@ -222,72 +204,13 @@ def build_excel_inference_frame(excel_path: Path, cutoff_day: int) -> pd.DataFra
 
 
 def train_inference_model(training_data: Path, metadata_path: Path, artifacts_dir: Path) -> dict[str, Path]:
-    """Fit and persist the preprocessing pipeline and binary passed model."""
+    """Train and persist the evaluated OULAD risk champion."""
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
     cutoff_day = metadata.get("cutoff_day")
     if isinstance(cutoff_day, bool) or not isinstance(cutoff_day, int):
         raise ValueError("Training metadata must contain an integer cutoff_day")
     frame = pd.read_csv(training_data)
-    _require_columns(frame, set(KEY_COLUMNS) | set(FEATURE_COLUMNS) | {"passed"}, "training data")
-    if frame.duplicated(KEY_COLUMNS).any():
-        raise ValueError("training data has duplicate enrollment keys")
-    if frame["passed"].isna().any() or frame["passed"].nunique() != 2:
-        raise ValueError("training data must contain both non-null passed classes")
-
-    training_features = frame[list(FEATURE_COLUMNS)].copy()
-    for column in NUMERIC_FEATURES:
-        training_features[column] = pd.to_numeric(training_features[column], errors="coerce")
-        if training_features[column].isna().all():
-            raise ValueError(f"training data has no usable values for {column}")
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            (
-                "categorical",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="most_frequent")),
-                        ("encoder", OneHotEncoder(handle_unknown="ignore")),
-                    ]
-                ),
-                list(CATEGORICAL_FEATURES),
-            ),
-            (
-                "numeric",
-                Pipeline(
-                    [
-                        ("imputer", SimpleImputer(strategy="median")),
-                        ("scaler", StandardScaler()),
-                    ]
-                ),
-                list(NUMERIC_FEATURES),
-            ),
-        ],
-        verbose_feature_names_out=False,
-    )
-    model = Pipeline(
-        [("preprocessor", preprocessor), ("classifier", LogisticRegression(max_iter=1000, random_state=42))]
-    )
-    model.fit(training_features, frame["passed"].astype(int))
-
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    model_path = artifacts_dir / MODEL_FILENAME
-    manifest_path = artifacts_dir / MANIFEST_FILENAME
-    joblib.dump(model, model_path)
-    manifest = {
-        "artifact_version": ARTIFACT_VERSION,
-        "cutoff_day": cutoff_day,
-        "model_target": "passed",
-        "feature_columns": list(FEATURE_COLUMNS),
-        "categorical_features": list(CATEGORICAL_FEATURES),
-        "known_key_values": {
-            column: sorted(frame[column].dropna().astype(str).unique().tolist())
-            for column in ("code_module", "code_presentation")
-        },
-        "training_rows": len(frame),
-    }
-    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    return {"model": model_path, "manifest": manifest_path}
+    return train_risk_champion(frame, artifacts_dir, cutoff_day).as_dict()
 
 
 def _oov_columns(model: Pipeline, features: pd.DataFrame) -> pd.Series:
@@ -316,18 +239,22 @@ def _oov_key_columns(frame: pd.DataFrame, manifest: dict[str, object]) -> pd.Ser
 def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cutoff_day: int) -> Path:
     """Generate enrollment-level predictions without mutating the source workbook."""
     manifest_path = artifacts_dir / MANIFEST_FILENAME
-    model_path = artifacts_dir / MODEL_FILENAME
-    if not manifest_path.exists() or not model_path.exists():
+    if not manifest_path.exists():
         raise FileNotFoundError("Inference artifacts are incomplete; run train-inference-model first")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    model_path = artifacts_dir / str(manifest.get("model_filename", MODEL_FILENAME))
+    if not model_path.exists():
+        raise FileNotFoundError("Inference artifacts are incomplete; run train-inference-model first")
     if manifest.get("cutoff_day") != cutoff_day:
         raise ValueError("cutoff_day must exactly match the trained inference artifact")
+    if manifest.get("contract_version") != CONTRACT_VERSION or manifest.get("contract_fingerprint") != contract_fingerprint():
+        raise ValueError("Inference artifact feature contract is incompatible")
     if manifest.get("feature_columns") != list(FEATURE_COLUMNS):
         raise ValueError("Inference artifact feature contract is incompatible")
 
     frame = build_excel_inference_frame(excel_path, cutoff_day)
     model = joblib.load(model_path)
-    features = frame[list(FEATURE_COLUMNS)]
+    features = validate_raw_features(frame, "Excel inference frame")
     output = frame[KEY_COLUMNS].copy()
     output["cutoff_day"] = cutoff_day
     output["model_target"] = manifest["model_target"]
@@ -339,6 +266,41 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
     if output_path.resolve() == excel_path.resolve():
         raise ValueError("Prediction output must not overwrite the source workbook")
     output.to_csv(output_path, index=False)
+    missing_counts = features.isna().sum().astype(int).to_dict()
+    oov_count = int((output["oov_categorical_fields"] != "none").sum())
+    baseline = manifest.get("baseline", {})
+    baseline_missing = {
+        **baseline.get("numeric_missing_rates", {}),
+        **baseline.get("categorical_missing_rates", {}),
+    }
+    current_missing = features.isna().mean().to_dict()
+    drift_warnings = [
+        f"missingness_shift:{column}"
+        for column, rate in current_missing.items()
+        if abs(rate - float(baseline_missing.get(column, rate))) >= 0.20
+    ]
+    if oov_count:
+        drift_warnings.append("unseen_categorical_values")
+    inference_report = {
+        "artifact_version": manifest.get("artifact_version"),
+        "champion_name": manifest.get("champion_name"),
+        "model_target": manifest.get("model_target"),
+        "risk_class": manifest.get("risk_class"),
+        "contract_version": manifest.get("contract_version"),
+        "contract_fingerprint": manifest.get("contract_fingerprint"),
+        "cutoff_day": cutoff_day,
+        "rows": len(output),
+        "oov": {
+            "rows_with_categorical_oov": oov_count,
+            "rows_with_key_oov": int((output["oov_key_fields"] != "none").sum()),
+        },
+        "missing_values_requiring_imputation": missing_counts,
+        "probability_passed": output["probability_passed"].describe(percentiles=[0.05, 0.5, 0.95]).to_dict(),
+        "drift_warnings": drift_warnings,
+        "prediction_csv": str(output_path),
+    }
+    report_path = output_path.with_suffix(".inference_report.json")
+    report_path.write_text(json.dumps(inference_report, indent=2, sort_keys=True, default=float) + "\n", encoding="utf-8")
     return output_path
 
 
@@ -349,7 +311,7 @@ def main_train() -> None:
     parser.add_argument("--training-metadata", type=Path, default=project_dir / "data" / "oulad_training_metadata.json")
     parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "artifacts")
     args = parser.parse_args()
-    paths = train_inference_model(args.training_data, args.training_metadata, args.artifacts_dir)
+    _ = train_inference_model(args.training_data, args.training_metadata, args.artifacts_dir)
     print(f"Persisted inference model and manifest in {args.artifacts_dir}")
 
 
