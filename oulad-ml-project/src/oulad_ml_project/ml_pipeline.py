@@ -94,7 +94,9 @@ class MLPipeline:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         cutoff_day = metadata.get("cutoff_day")
         print("\n[MODEL] Training risk-classifier candidates...")
-        self.trainer = ModelTrainer.for_risk_training(self.df, self.output_dir / "artifacts", cutoff_day)
+        self.trainer = ModelTrainer.for_risk_training(
+            self.df, self.output_dir / "models" / "academic_risk", cutoff_day, data_filename=self.data_path.name
+        )
         artifacts = self.trainer.train_risk_champion()
         self.results = artifacts.as_dict()
         return self.results
@@ -107,8 +109,8 @@ class MLPipeline:
             Dict con resultados de todos los modelos
         """
         self.load_data()
-        print(f"  Distribución target (passed):\n{self.df['passed'].value_counts(normalize=True)}")
-        print(f"  Distribución target (performance_tier):\n{self.df['performance_tier'].value_counts(normalize=True)}")
+        risk = self.df["final_result"].isin({"Withdrawn", "Fail"}).astype(int)
+        print(f"  Distribución target (academic_risk):\n{risk.value_counts(normalize=True)}")
         self.train_models()
         print("\n" + "=" * 60)
         print("PROYECTO COMPLETADO EXITOSAMENTE")

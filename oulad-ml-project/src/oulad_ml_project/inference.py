@@ -211,7 +211,9 @@ def train_inference_model(training_data: Path, metadata_path: Path, artifacts_di
     if isinstance(cutoff_day, bool) or not isinstance(cutoff_day, int):
         raise ValueError("Training metadata must contain an integer cutoff_day")
     frame = pd.read_csv(training_data)
-    return ModelTrainer.for_risk_training(frame, artifacts_dir, cutoff_day).train_risk_champion().as_dict()
+    return ModelTrainer.for_risk_training(
+        frame, artifacts_dir, cutoff_day, data_filename=training_data.name
+    ).train_risk_champion().as_dict()
 
 
 def _oov_columns(model: Pipeline, features: pd.DataFrame) -> pd.Series:
@@ -241,9 +243,11 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
     """Generate enrollment-level predictions without mutating the source workbook."""
     manifest_path = artifacts_dir / MANIFEST_FILENAME
     if not manifest_path.exists():
-        raise FileNotFoundError("Inference artifacts are incomplete; run train-inference-model first")
+        raise FileNotFoundError(
+            "Inference artifacts must be a UUID bundle directory containing inference_manifest.json"
+        )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    model_path = artifacts_dir / str(manifest.get("model_filename", MODEL_FILENAME))
+    model_path = manifest_path.parent / str(manifest.get("model_path", manifest.get("model_filename", MODEL_FILENAME)))
     if not model_path.exists():
         raise FileNotFoundError("Inference artifacts are incomplete; run train-inference-model first")
     if manifest.get("cutoff_day") != cutoff_day:
@@ -259,8 +263,8 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
     output = frame[KEY_COLUMNS].copy()
     output["cutoff_day"] = cutoff_day
     output["model_target"] = manifest["model_target"]
-    output["prediction_passed"] = model.predict(features).astype(int)
-    output["probability_passed"] = model.predict_proba(features)[:, 1]
+    output["prediction_academic_risk"] = model.predict(features).astype(int)
+    output["probability_academic_risk"] = model.predict_proba(features)[:, 1]
     output["oov_categorical_fields"] = _oov_columns(model, features)
     output["oov_key_fields"] = _oov_key_columns(frame, manifest)
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -286,7 +290,7 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
         "artifact_version": manifest.get("artifact_version"),
         "champion_name": manifest.get("champion_name"),
         "model_target": manifest.get("model_target"),
-        "risk_class": manifest.get("risk_class"),
+        "target_definition": manifest.get("target_definition"),
         "contract_version": manifest.get("contract_version"),
         "contract_fingerprint": manifest.get("contract_fingerprint"),
         "cutoff_day": cutoff_day,
@@ -296,7 +300,7 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
             "rows_with_key_oov": int((output["oov_key_fields"] != "none").sum()),
         },
         "missing_values_requiring_imputation": missing_counts,
-        "probability_passed": output["probability_passed"].describe(percentiles=[0.05, 0.5, 0.95]).to_dict(),
+        "probability_academic_risk": output["probability_academic_risk"].describe(percentiles=[0.05, 0.5, 0.95]).to_dict(),
         "drift_warnings": drift_warnings,
         "prediction_csv": str(output_path),
     }
@@ -310,7 +314,7 @@ def main_train() -> None:
     parser = argparse.ArgumentParser(description="Train persisted OULAD Excel inference artifacts.")
     parser.add_argument("--training-data", type=Path, default=project_dir / "data" / "oulad_training_full.csv")
     parser.add_argument("--training-metadata", type=Path, default=project_dir / "data" / "oulad_training_metadata.json")
-    parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "artifacts")
+    parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "output" / "models" / "academic_risk")
     args = parser.parse_args()
     _ = train_inference_model(args.training_data, args.training_metadata, args.artifacts_dir)
     print(f"Persisted inference model and manifest in {args.artifacts_dir}")
@@ -320,7 +324,7 @@ def main_predict() -> None:
     project_dir = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Predict OULAD enrollments from the supported Excel workbook.")
     parser.add_argument("--excel", type=Path, required=True)
-    parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "artifacts")
+    parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "output" / "models" / "academic_risk")
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cutoff-day", type=int, required=True)
     args = parser.parse_args()

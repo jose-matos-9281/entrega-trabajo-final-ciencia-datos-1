@@ -14,6 +14,7 @@ from oulad_ml_project.data_sources import KEY_COLUMNS, SQL_PATH, TARGET_COLUMNS,
 from oulad_ml_project.ml_pipeline import MLPipeline
 from oulad_ml_project.preprocessing import DataPreprocessor
 from oulad_ml_project.train_ml import ModelTrainer
+from oulad_ml_project.feature_contract import FEATURE_COLUMNS, validate_raw_features
 
 
 class TrainingArtifactsTest(unittest.TestCase):
@@ -170,6 +171,22 @@ class TrainingArtifactsTest(unittest.TestCase):
         self.assertTrue(pd.isna(processed.loc[0, "final_result"]))
         self.assertTrue(pd.isna(processed.loc[0, "weighted_assessment_score"]))
 
+    def test_inference_feature_contract_rejects_outcomes_and_unsupported_columns(self):
+        frame = pd.DataFrame(
+            {
+                "id_student": [1], "code_module": ["AAA"], "code_presentation": ["2013J"],
+                "highest_education": ["Bachelor"], "age_band": ["0-35"],
+                "num_of_prev_attempts": [0], "studied_credits": [60], "date_registration": [-10],
+                "course_duration_days": [100], "total_clicks": [4], "active_days": [1],
+                "vle_events": [1], "vle_sites": [1], "has_vle_activity": [1],
+                "final_result": ["Pass"],
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "target or outcome"):
+            validate_raw_features(frame, "inference")
+        self.assertEqual(len(FEATURE_COLUMNS), 11)
+
     def test_grouped_splits_keep_students_disjoint_and_exclude_identity_features(self):
         frame = pd.DataFrame(
             {
@@ -213,7 +230,9 @@ class TrainingArtifactsTest(unittest.TestCase):
             with patch("oulad_ml_project.ml_pipeline.ModelTrainer.for_risk_training", return_value=trainer) as factory:
                 result = pipeline.train_models()
 
-        factory.assert_called_once_with(pipeline.df, root / "output" / "artifacts", 30)
+        factory.assert_called_once_with(
+            pipeline.df, root / "output" / "models" / "academic_risk", 30, data_filename="unused.csv"
+        )
         trainer.train_risk_champion.assert_called_once_with()
         self.assertEqual(result, {"model": root / "passed_model.joblib"})
 

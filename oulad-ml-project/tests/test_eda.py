@@ -51,12 +51,17 @@ class ExploratoryDataAnalysisTests(unittest.TestCase):
 
             self.assertTrue((output / "eda_report.md").exists())
             self.assertTrue((output / "figures" / "cohort_engagement_total_clicks.png").exists())
+            self.assertTrue((output / "final_result_distribution.csv").exists())
+            self.assertTrue((output / "academic_risk_by_engagement_quartile.csv").exists())
+            self.assertTrue((output / "score_missingness_by_final_result.csv").exists())
+            self.assertTrue((output / "figures" / "final_result_distribution.png").exists())
+            self.assertTrue((output / "figures" / "score_missingness_by_final_result.png").exists())
             self.assertIn(output / "eda_report.md", manifest)
             report = (output / "eda_report.md").read_text(encoding="utf-8")
-            self.assertIn("figures/observed_score_by_engagement_quantile.png", report)
-            self.assertIn("5/8", report)
-            self.assertIn("# Análisis exploratorio de datos de OULAD", report)
-            self.assertIn("Estas comparaciones descriptivas no establecen una relación causal", report)
+            self.assertIn("figures/academic_risk_by_engagement_quartile.png", report)
+            self.assertIn("Fail: 4/8", report)
+            self.assertIn("# EDA de OULAD: alerta temprana", report)
+            self.assertIn("no demuestran causalidad", report)
             self.assertIn(f"etiqueta `{MISSING_IMD_LABEL}`", report)
             self.assertNotIn("`Missing`", report)
 
@@ -74,7 +79,7 @@ class ExploratoryDataAnalysisTests(unittest.TestCase):
         self.assertIn("Interacción de la cohorte: total de clics antes del corte", titles)
         self.assertIn("Valores faltantes y disponibilidad de puntuaciones observadas", titles)
         self.assertIn("Variable", x_labels)
-        self.assertIn("Tasa de aprobación (%)", y_labels)
+        self.assertIn("Tasa de riesgo académico (%)", y_labels)
         self.assertFalse(any("Pass Rate" in label or "Missingness" in label for label in titles))
 
     def test_target_columns_are_excluded_from_candidate_correlations(self):
@@ -85,24 +90,27 @@ class ExploratoryDataAnalysisTests(unittest.TestCase):
         self.assertTrue(set(TARGET_COLUMNS).isdisjoint(correlation.columns))
         self.assertTrue(set(KEY_COLUMNS).isdisjoint(correlation.columns))
 
-    def test_observed_score_summary_keeps_scored_and_total_denominators(self):
+    def test_academic_risk_uses_descriptive_outcomes_and_keeps_denominators(self):
         with tempfile.TemporaryDirectory() as directory:
             eda = ExploratoryDataAnalysis(sample_mart(), Path(directory), Path(directory) / "output")
-            engagement, _, _ = eda.outcome_relationships()
+            final_result, risk, engagement, _, score_missingness = eda.academic_risk_analysis()
 
         self.assertEqual(engagement["n_total"].sum(), 8)
-        self.assertEqual(engagement["n_scored"].sum(), 5)
-        self.assertTrue((engagement["n_scored"] <= engagement["n_total"]).all())
-        self.assertAlmostEqual(engagement["observed_score_share"].sum(), 2.5)
+        self.assertEqual(engagement["n_academic_risk"].sum(), 4)
+        self.assertEqual(engagement.iloc[0]["academic_risk_rate"], 1.0)
+        self.assertEqual(engagement.iloc[-1]["academic_risk_rate"], 0.0)
+        self.assertEqual(final_result.set_index("final_result").loc["Fail", "n_total"], 4)
+        self.assertEqual(risk.set_index("academic_risk").loc["Riesgo académico", "n_total"], 4)
+        self.assertEqual(score_missingness.set_index("final_result").loc["Fail", "n_score_missing"], 2)
+        self.assertNotIn("academic_risk", eda.candidate_features)
 
     def test_sparse_course_groups_are_suppressed(self):
         with tempfile.TemporaryDirectory() as directory:
             eda = ExploratoryDataAnalysis(sample_mart(), Path(directory), Path(directory) / "output")
-            _, _, course = eda.outcome_relationships()
+            _, _, _, course, _ = eda.academic_risk_analysis()
 
         self.assertTrue(course["suppressed"].all())
-        self.assertTrue(course["pass_rate"].isna().all())
-        self.assertTrue(course["observed_score_mean"].isna().all())
+        self.assertTrue(course["academic_risk_rate"].isna().all())
 
     def test_duplicate_enrollment_key_is_rejected(self):
         frame = pd.concat([sample_mart(), sample_mart().iloc[[0]]], ignore_index=True)

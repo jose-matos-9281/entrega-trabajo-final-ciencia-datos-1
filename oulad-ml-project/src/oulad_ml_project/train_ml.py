@@ -43,6 +43,9 @@ from sklearn.cluster import KMeans
 import warnings
 from pathlib import Path
 from .risk_model import TrainingArtifacts, train_risk_champion
+
+
+MODEL_EVALUATION_REPORT_FILENAME = "model_evaluation_report.md"
 warnings.filterwarnings('ignore')
 
 # ------------------------------------------------------------
@@ -92,15 +95,19 @@ class ModelTrainer:
         self.models = {}
 
     @classmethod
-    def for_risk_training(cls, frame: pd.DataFrame, artifacts_dir: Path, cutoff_day: int) -> "ModelTrainer":
+    def for_risk_training(
+        cls, frame: pd.DataFrame, artifacts_dir: Path, cutoff_day: int, *, data_filename: str = "oulad_training_full.csv"
+    ) -> "ModelTrainer":
         """Construct the sole production facade for the leakage-safe risk champion."""
-        return cls(output_dir=artifacts_dir, training_frame=frame, cutoff_day=cutoff_day)
+        trainer = cls(output_dir=artifacts_dir, training_frame=frame, cutoff_day=cutoff_day)
+        trainer.data_filename = data_filename
+        return trainer
 
     def train_risk_champion(self) -> TrainingArtifacts:
         """Publish the leakage-safe champion and its reproducible training evidence."""
         if self.training_frame is None or self.output_dir is None or self.cutoff_day is None:
             raise ValueError("risk training requires frame, artifacts_dir, and cutoff_day")
-        artifacts = train_risk_champion(self.training_frame, self.output_dir, self.cutoff_day)
+        artifacts = train_risk_champion(self.training_frame, self.output_dir, self.cutoff_day, data_filename=self.data_filename)
         return self._add_risk_visualizations(artifacts)
 
     def _add_risk_visualizations(self, artifacts: TrainingArtifacts) -> TrainingArtifacts:
@@ -109,12 +116,10 @@ class ModelTrainer:
         manifest = json.loads(artifacts.manifest.read_text(encoding="utf-8"))
         candidates = pd.read_csv(artifacts.metrics)
         holdout = pd.read_csv(artifacts.evaluation_predictions)
-        figures_dir = self.output_dir / "figures"
-        figures_dir.mkdir(parents=True, exist_ok=True)
-        version = artifacts.model.name.removesuffix("-passed_model.joblib")
+        bundle_dir = artifacts.manifest.parent
 
-        metrics_plot = figures_dir / f"{version}-candidate_metrics.png"
-        plot_metrics = ["risk_recall", "risk_precision", "risk_f1", "accuracy", "roc_auc"]
+        metrics_plot = bundle_dir / "candidate_metrics.png"
+        plot_metrics = ["pr_auc", "roc_auc", "brier_score", "precision_at_0_5", "recall_at_0_5"]
         candidates.set_index("model")[plot_metrics].plot(kind="bar", figsize=(11, 6))
         plt.ylabel("Cross-validation mean")
         plt.title("Risk-model candidate comparison")
@@ -122,9 +127,9 @@ class ModelTrainer:
         plt.savefig(metrics_plot, dpi=150)
         plt.close()
 
-        confusion_plot = figures_dir / f"{version}-champion_confusion_matrix.png"
+        confusion_plot = bundle_dir / "champion_confusion_matrix.png"
         ConfusionMatrixDisplay.from_predictions(
-            holdout["passed_actual"], holdout["prediction_passed"], labels=[0, 1], cmap="Blues"
+            holdout["academic_risk_actual"], holdout["prediction_academic_risk"], labels=[0, 1], cmap="Blues"
         )
         plt.title(f"Champion holdout confusion matrix: {report['champion']['name']}")
         plt.tight_layout()
@@ -142,23 +147,24 @@ class ModelTrainer:
             names = model.named_steps["preprocessor"].get_feature_names_out()
             values = np.abs(classifier.coef_).ravel() if hasattr(classifier, "coef_") else classifier.feature_importances_
             top = pd.Series(values, index=names).sort_values().tail(15)
-            importance_plot = figures_dir / f"{version}-champion_feature_importance.png"
+            importance_plot = bundle_dir / "champion_feature_importance.png"
             top.plot(kind="barh", figsize=(10, 7))
             plt.xlabel("Absolute coefficient" if hasattr(classifier, "coef_") else "Feature importance")
             plt.title(f"Champion feature importance: {report['champion']['name']}")
             plt.tight_layout()
             plt.savefig(importance_plot, dpi=150)
             plt.close()
-            feature_importance = {"status": "generated", "path": str(importance_plot.relative_to(self.output_dir))}
+            feature_importance = {"status": "generated", "path": importance_plot.name}
 
         artifact_paths = {
             "model": artifacts.model.name,
             "manifest": artifacts.manifest.name,
             "report": artifacts.report.name,
+            "model_evaluation_report": MODEL_EVALUATION_REPORT_FILENAME,
             "candidate_metrics_csv": artifacts.metrics.name,
             "holdout_predictions_csv": artifacts.evaluation_predictions.name,
-            "candidate_metrics_plot": str(metrics_plot.relative_to(self.output_dir)),
-            "champion_confusion_matrix_plot": str(confusion_plot.relative_to(self.output_dir)),
+            "candidate_metrics_plot": metrics_plot.name,
+            "champion_confusion_matrix_plot": confusion_plot.name,
             "champion_feature_importance": feature_importance,
         }
         report["artifacts"] = artifact_paths
@@ -166,11 +172,167 @@ class ModelTrainer:
             "Candidate metrics are GroupKFold means on the training partition, not holdout metrics.",
             "The holdout is evaluated once after selection and must not be used for model selection.",
             "Feature importance is only reported when the selected classifier exposes coefficients or feature_importances_.",
+            "Associations are predictive, not causal.",
         ]
         artifacts.report.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
         manifest["training_artifacts"] = artifact_paths
+        manifest["artifact_catalog"] = [
+            {
+                "category": "evaluation_report",
+                "path": MODEL_EVALUATION_REPORT_FILENAME,
+                "description": "Agent-readable Markdown evaluation of candidates, champion decision, and holdout results.",
+            }
+        ]
         artifacts.manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        (bundle_dir / MODEL_EVALUATION_REPORT_FILENAME).write_text(
+            self._model_evaluation_markdown(report, manifest), encoding="utf-8"
+        )
         return artifacts
+
+    @staticmethod
+    def _model_evaluation_markdown(report: dict[str, object], manifest: dict[str, object]) -> str:
+        """Render a stable, bundle-relative evaluation handoff for humans and agents."""
+        target = report["target"]
+        selection = report["selection"]
+        evaluation = report["evaluation"]
+        split = report["split"]
+        exclusions = report["feature_exclusions"]
+        artifacts = report["artifacts"]
+        metrics = ("pr_auc", "roc_auc", "brier_score", "precision_at_0_5", "recall_at_0_5")
+
+        def value(item: object) -> str:
+            return "not available" if item is None else str(item)
+
+        candidate_rows = [
+            "| " + " | ".join([str(candidate["model"]), *(value(candidate[metric]) for metric in metrics)]) + " |"
+            for candidate in selection["candidates"]
+        ]
+        holdout_metrics = evaluation["champion_metrics"]
+        calibration_rows = [
+            "| " + " | ".join(value(bin_[key]) for key in ("mean_predicted_risk", "observed_risk", "rows")) + " |"
+            for bin_ in evaluation["calibration"]
+        ]
+        capacity = holdout_metrics["intervention_capacity"]
+        artifact_rows = [
+            f"| Model | `{artifacts['model']}` | Serialized selected champion. |",
+            f"| Manifest | `{artifacts['manifest']}` | Portable bundle index and inference contract. |",
+            f"| Structured training report | `{artifacts['report']}` | Machine-readable training evidence. |",
+            f"| Evaluation report | `{artifacts['model_evaluation_report']}` | This agent-readable Markdown report. |",
+            f"| Candidate metrics | `{artifacts['candidate_metrics_csv']}` | GroupKFold mean candidate metrics. |",
+            f"| Holdout predictions | `{artifacts['holdout_predictions_csv']}` | Row-level independent holdout predictions. |",
+            f"| Candidate comparison chart | `{artifacts['candidate_metrics_plot']}` | Visual comparison of CV metrics. |",
+            f"| Champion confusion matrix | `{artifacts['champion_confusion_matrix_plot']}` | Threshold 0.5 holdout outcomes. |",
+        ]
+        importance = artifacts["champion_feature_importance"]
+        if importance["status"] == "generated":
+            artifact_rows.append(f"| Champion feature importance | `{importance['path']}` | Model-specific importance visualization. |")
+        else:
+            artifact_rows.append(f"| Champion feature importance | not generated | {importance['reason']} |")
+
+        return f"""# Model Evaluation Report
+
+## Experiment Summary
+
+| Field | Value |
+|---|---|
+| Artifact version | {report['artifact_version']} |
+| Training data | `{report['data_filename']}` |
+| Cutoff day | {report['cutoff_day']} |
+| Model target | {manifest['model_target']} |
+| Final decision | Select `{report['champion']['name']}` as the champion. |
+
+## Target Definition
+
+`{target['definition']}` The positive class is `{target['positive_class']}` and represents academic risk.
+
+## Data and Split
+
+| Field | Value |
+|---|---|
+| Holdout strategy | {evaluation['strategy']} |
+| Group column | `{split['group_column']}` |
+| Development rows / students | {split['train_rows']} / {split['train_students']} |
+| Holdout rows / students | {split['test_rows']} / {split['test_students']} |
+| Shared students | {split['shared_students']} |
+| GroupKFold folds | {selection['folds']} |
+| Holdout rows used during selection | {selection['holdout_rows_used']} |
+
+## Feature Safety
+
+- Enrollment keys excluded from model features: {', '.join(f'`{item}`' for item in exclusions['enrollment_keys'])}.
+- Outcomes excluded from model features: {', '.join(f'`{item}`' for item in exclusions['outcomes'])}.
+- Sensitive predictors excluded from model features: {', '.join(f'`{item}`' for item in exclusions['sensitive_predictors'])}.
+- Post-cutoff safety: {exclusions['post_cutoff']}.
+- Preprocessing is fit inside each CV fold and only on development data for the published champion.
+
+## Models Evaluated
+
+Candidates were `PrevalenceBaseline`, `LogisticRegression`, and `DecisionTreeClassifier`. The baseline establishes the performance available from class prevalence alone; it is not a deployable intervention policy.
+
+## Metric Guide
+
+| Metric | Meaning |
+|---|---|
+| PR-AUC | Area under the precision-recall curve for academic risk; higher is better and it is the champion-selection metric. |
+| ROC-AUC | Probability-ranking discrimination across thresholds; higher is better. |
+| Brier score | Mean squared error of predicted risk probabilities; lower is better. |
+| Calibration | Agreement between predicted risk and observed risk in holdout bins; closer agreement is better. |
+| Precision | Among students flagged at a threshold or capacity, the share actually at academic risk. |
+| Recall | Among students actually at academic risk, the share flagged at a threshold or capacity. |
+| Top-20% intervention capacity | Holdout precision and recall when only the highest-risk 20% are selected for possible intervention. |
+
+## Candidate Comparison
+
+These are mean GroupKFold metrics on development data only; they are not holdout estimates.
+
+| Model | PR-AUC | ROC-AUC | Brier score | Precision at 0.5 | Recall at 0.5 |
+|---|---|---|---|---|---|
+{chr(10).join(candidate_rows)}
+
+## Champion Decision
+
+`{report['champion']['name']}` was selected because it had the highest development GroupKFold PR-AUC. The explicit selection metric is `{selection['primary_metric']}`; lower Brier score breaks a PR-AUC tie. The independent holdout was not used to select or tune the champion.
+
+## Holdout Evaluation
+
+| Metric | Literal value |
+|---|---|
+| PR-AUC | {value(holdout_metrics['pr_auc'])} |
+| ROC-AUC | {value(holdout_metrics['roc_auc'])} |
+| Brier score | {value(holdout_metrics['brier_score'])} |
+| Precision at 0.5 | {value(holdout_metrics['precision_at_0_5'])} |
+| Recall at 0.5 | {value(holdout_metrics['recall_at_0_5'])} |
+
+Calibration bins from the independent holdout:
+
+| Mean predicted risk | Observed risk | Rows |
+|---|---|---|
+{chr(10).join(calibration_rows)}
+
+## Operational Capacity
+
+At top-{float(capacity['capacity']) * 100:g}% capacity, the holdout selection contains {capacity['selected_rows']} rows with precision {capacity['precision']} and recall {capacity['recall']}. This is an evaluation scenario, not an approved intervention threshold. Threshold and capacity remain an institutional decision.
+
+## Artifacts
+
+All paths are relative to this bundle directory.
+
+| Artifact | Relative path | Description |
+|---|---|---|
+{chr(10).join(artifact_rows)}
+
+## Interpretation Limits
+
+- This model measures predictive associations, not causal effects; it supports no causal conclusion.
+- A sensitivity/fairness audit was not performed in this training run.
+- Candidate metrics are grouped-CV means on development data, while the holdout is evaluated once after selection.
+- Leakage protections exclude outcomes, enrollment keys, sensitive predictors, unsupported post-cutoff columns, and shared students across partitions.
+- A probability threshold or top-20% capacity is not a policy recommendation; the institution must decide its intervention capacity, benefits, costs, and safeguards.
+
+## Agent Handoff
+
+Use `{artifacts['manifest']}` as the portable bundle entry point and `{artifacts['report']}` for structured fields. Treat `{artifacts['candidate_metrics_csv']}` as development-only evidence and `{artifacts['holdout_predictions_csv']}` as the single independent evaluation. The final artifact decision is: use `{report['champion']['name']}` only within the recorded cutoff and feature contract; do not infer causality, fairness, or an institutional intervention threshold from this run.
+"""
 
     def split_data(self, target_name, target_col=None):
         """

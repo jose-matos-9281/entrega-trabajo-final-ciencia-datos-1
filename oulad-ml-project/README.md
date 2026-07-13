@@ -12,8 +12,8 @@ This project trains leakage-safe OULAD enrollment models from the canonical Neon
 ```bash
 uv sync
 uv run create-data --cutoff-day 30 --output-dir data
-uv run train-inference-model --training-data data/oulad_training_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
-uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cutoff-day 30 --output output/excel_predictions.csv
+uv run ml_pipeline
+uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir output/models/academic_risk/<uuid> --cutoff-day 30 --output output/predictions/excel_predictions.csv
 ```
 
 ## Architecture
@@ -67,19 +67,30 @@ This writes:
 ## Train And Persist Inference Artifacts
 
 ```bash
-uv run train-inference-model --training-data data/oulad_training_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
+uv run train-inference-model --training-data data/oulad_training_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir output/models/academic_risk
 ```
 
 The command performs a grouped split by `id_student` before fitting any imputer, encoder, or scaler. It evaluates all candidates with `passed=0` as the risk class and selects the champion by `risk_recall`; risk precision, risk F1, ROC-AUC, and general metrics remain guardrails rather than a substitute for the operational objective.
 
-It persists a versioned champion bundle, JSON report, candidate-metrics CSV, and holdout-predictions CSV, plus a stable `artifacts/inference_manifest.json`. It also writes non-interactive PNG charts under `artifacts/figures/`: candidate metric comparison, champion holdout confusion matrix, and feature importance when the champion exposes coefficients or `feature_importances_`. The report references every artifact, records the grouped split, train-only CV selection, holdout metrics, feature contract, and limitations. The manifest repeats the artifact references for discovery while inference continues to consume only the manifest and champion bundle.
+It persists a versioned, self-contained champion bundle, JSON report, candidate-metrics CSV, and holdout-predictions CSV. The manifest resolves every artifact through a path relative to its own bundle directory.
+
+## Output Layout
+
+`output/` separa las salidas persistentes por significado. Cada ejecución de riesgo académico vive en un único directorio UUID:
+
+| Ruta | Contenido |
+|---|---|
+| `output/eda/` | Artefactos descriptivos del EDA; se preserva sin cambios. |
+| `output/models/academic_risk/<uuid>/` | Bundle autocontenido: `academic_risk_model.joblib`, `inference_manifest.json`, `training_report.json`, `model_evaluation_report.md`, `training_metrics.csv`, `evaluation_predictions.csv`, `candidate_metrics.png`, `champion_confusion_matrix.png` y, cuando corresponda, `champion_feature_importance.png`. |
+
+El manifest referencia los artefactos mediante rutas relativas portables dentro de su propio UUID. `model_evaluation_report.md` es el handoff técnico generado por ejecución: documenta métricas, decisión de champion, límites y rutas del bundle para personas y agentes. Para inferencia, `--artifacts-dir` debe apuntar explícitamente a `output/models/academic_risk/<uuid>/`; el directorio raíz no selecciona una ejecución implícitamente.
 
 The serialized bundle is the evaluated champion, fit only on the training partition. Candidate selection uses GroupKFold only within that partition, prioritizing recall for risk class `passed=0`; the independent grouped holdout is evaluated only after selection. Feature importance is omitted, with an explicit reason in the report, for models that do not expose a supported importance interface. Prediction refuses an artifact whose cutoff or feature contract differs from the requested run.
 
 ## Predict From Excel
 
 ```bash
-uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cutoff-day 30 --output output/excel_predictions.csv
+uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir output/models/academic_risk/<uuid> --cutoff-day 30 --output output/predictions/excel_predictions.csv
 ```
 
 The source workbook remains unchanged. The output contains the three enrollment keys, cutoff, model target, class prediction, probability, `oov_categorical_fields`, and `oov_key_fields`. A sibling `<output>.inference_report.json` records the champion, contract, row count, OOV counts, missing values passed to imputers, probability distribution, and drift warnings. `none` in an OOV field means no value was unseen in training. Unknown modules and presentations remain metadata, never model features, and are reported in `oov_key_fields`; unknown regions and other categorical feature values use the persisted encoder with unknown categories ignored.

@@ -154,6 +154,7 @@ class ExcelInferenceTest(unittest.TestCase):
                     "vle_sites": [1, 1, 1, 1],
                     "has_vle_activity": [1, 1, 1, 1],
                     "passed": [0, 1, 0, 1],
+                    "final_result": ["Fail", "Pass", "Fail", "Pass"],
                 }
             )
             training = pd.concat([training, training.assign(id_student=lambda rows: rows["id_student"] + 4)], ignore_index=True)
@@ -165,19 +166,19 @@ class ExcelInferenceTest(unittest.TestCase):
             training.to_csv(training_path, index=False)
             metadata_path.write_text(json.dumps({"cutoff_day": 30}), encoding="utf-8")
             write_workbook(workbook, missing_optional_features=True)
-            train_inference_model(training_path, metadata_path, root / "artifacts")
+            paths = train_inference_model(training_path, metadata_path, root / "artifacts")
             frame = build_excel_inference_frame(workbook, 30)
-            predict_excel(workbook, root / "artifacts", output, 30)
+            with self.assertRaisesRegex(FileNotFoundError, "UUID bundle directory"):
+                predict_excel(workbook, root / "artifacts", output, 30)
+            predict_excel(workbook, paths["manifest"].parent, output, 30)
             predictions = pd.read_csv(output)
             report = json.loads(output.with_suffix(".inference_report.json").read_text(encoding="utf-8"))
 
-        self.assertTrue(
-            frame[["imd_band", "age_band", "num_of_prev_attempts", "studied_credits"]].isna().any().all()
-        )
+        self.assertTrue(frame[["age_band", "num_of_prev_attempts", "studied_credits"]].isna().any().all())
         self.assertEqual(len(predictions), 2)
-        self.assertIn("region", predictions.loc[1, "oov_categorical_fields"])
+        self.assertEqual(predictions.loc[1, "oov_categorical_fields"], "none")
         self.assertEqual(predictions.loc[0, "oov_key_fields"], "none")
-        self.assertTrue(predictions["probability_passed"].between(0, 1).all())
+        self.assertTrue(predictions["probability_academic_risk"].between(0, 1).all())
         self.assertEqual(report["contract_version"], CONTRACT_VERSION)
         self.assertEqual(report["rows"], 2)
 
@@ -188,7 +189,7 @@ class ExcelInferenceTest(unittest.TestCase):
                 {
                     "id_student": student,
                     "code_module": "AAA" if student % 2 else "BBB",
-                    "code_presentation": "2013J" if student % 2 else "2014J",
+                    "code_presentation": "2013J" if student <= 12 else "2014J",
                     "gender": "F" if student % 2 else "M",
                     "region": "North" if student % 3 else "South",
                     "highest_education": "Bachelor",
@@ -204,7 +205,7 @@ class ExcelInferenceTest(unittest.TestCase):
                     "vle_events": student,
                     "vle_sites": 1,
                     "has_vle_activity": 1,
-                    "passed": student % 2,
+                    "final_result": "Fail" if student % 2 else "Pass",
                 }
             )
         training = pd.DataFrame(rows)
@@ -220,38 +221,56 @@ class ExcelInferenceTest(unittest.TestCase):
             paths = train_inference_model(training_path, metadata_path, root / "artifacts")
             manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
             report = json.loads(paths["report"].read_text(encoding="utf-8"))
+            evaluation_report = (paths["manifest"].parent / "model_evaluation_report.md").read_text(encoding="utf-8")
             bundle = joblib.load(paths["model"])
+            bundle_root = paths["manifest"].parent
             artifact_exists = [
-                (paths["report"].parent / report["artifacts"]["candidate_metrics_csv"]).exists(),
-                (paths["report"].parent / report["artifacts"]["holdout_predictions_csv"]).exists(),
-                (paths["report"].parent / report["artifacts"]["candidate_metrics_plot"]).exists(),
-                (paths["report"].parent / report["artifacts"]["champion_confusion_matrix_plot"]).exists(),
-                (paths["report"].parent / report["artifacts"]["champion_feature_importance"]["path"]).exists(),
+                (bundle_root / report["artifacts"]["candidate_metrics_csv"]).exists(),
+                (bundle_root / report["artifacts"]["holdout_predictions_csv"]).exists(),
+                (bundle_root / report["artifacts"]["candidate_metrics_plot"]).exists(),
+                (bundle_root / report["artifacts"]["champion_confusion_matrix_plot"]).exists(),
+                (bundle_root / report["artifacts"]["champion_feature_importance"]["path"]).exists(),
             ]
-            predict_excel(workbook, root / "artifacts", output, 30)
+            predict_excel(workbook, paths["manifest"].parent, output, 30)
             inference_report = json.loads(output.with_suffix(".inference_report.json").read_text(encoding="utf-8"))
 
-        _, test_positions = next(
-            GroupShuffleSplit(n_splits=1, test_size=0.25, random_state=42).split(
-                training, training["passed"], training["id_student"]
-            )
-        )
-        train_positions = training.index.difference(training.index[test_positions])
+        test_positions = training.index[training["code_presentation"] == "2014J"]
+        train_positions = training.index[training["code_presentation"] != "2014J"]
         imputer = bundle.named_steps["preprocessor"].named_transformers_["numeric"].named_steps["imputer"]
         total_clicks_position = list(NUMERIC_FEATURES).index("total_clicks")
 
         self.assertEqual(manifest["champion_name"], report["champion"]["name"])
         self.assertEqual(bundle.named_steps["classifier"].__class__.__name__, manifest["champion_name"])
         self.assertEqual(manifest["training_artifacts"], report["artifacts"])
+        self.assertIn(
+            {"category": "evaluation_report", "path": "model_evaluation_report.md", "description": "Agent-readable Markdown evaluation of candidates, champion decision, and holdout results."},
+            manifest["artifact_catalog"],
+        )
+        self.assertEqual(paths["model"].parent, paths["manifest"].parent)
+        self.assertEqual(paths["report"].parent, paths["manifest"].parent)
+        self.assertEqual(paths["metrics"].parent, paths["manifest"].parent)
+        self.assertEqual(paths["evaluation_predictions"].parent, paths["manifest"].parent)
+        self.assertEqual(len(paths["manifest"].parent.name), 32)
+        self.assertEqual(manifest["model_path"], paths["model"].name)
+        self.assertEqual(manifest["training_report"], "training_report.json")
         self.assertEqual(report["artifacts"]["champion_feature_importance"]["status"], "generated")
         self.assertTrue(all(artifact_exists))
         self.assertEqual(manifest["training_rows"], len(train_positions))
         self.assertEqual(report["selection"]["strategy"], "GroupKFold")
         self.assertEqual(report["selection"]["rows"], len(train_positions))
         self.assertEqual(report["selection"]["holdout_rows_used"], 0)
-        self.assertEqual(report["evaluation"]["strategy"], "GroupShuffleSplit holdout")
+        self.assertEqual(report["target"]["name"], "academic_risk")
+        self.assertEqual(report["evaluation"]["strategy"], "temporal_holdout_2014J")
         self.assertEqual(report["evaluation"]["rows"], len(test_positions))
         self.assertIn("champion_metrics", report["evaluation"])
+        for heading in (
+            "Experiment Summary", "Target Definition", "Data and Split", "Feature Safety", "Models Evaluated",
+            "Metric Guide", "Candidate Comparison", "Champion Decision", "Holdout Evaluation",
+            "Operational Capacity", "Artifacts", "Interpretation Limits", "Agent Handoff",
+        ):
+            self.assertIn(f"## {heading}", evaluation_report)
+        self.assertIn(f"Select `{manifest['champion_name']}` as the champion.", evaluation_report)
+        self.assertIn("`model_evaluation_report.md`", evaluation_report)
         self.assertAlmostEqual(
             imputer.statistics_[total_clicks_position], training.loc[train_positions, "total_clicks"].median()
         )

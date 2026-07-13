@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -13,10 +14,13 @@ from .data_sources import KEY_COLUMNS, TARGET_COLUMNS
 
 
 SCORE_COLUMN = "weighted_assessment_score"
-PASS_COLUMN = "passed"
 ENGAGEMENT_COLUMN = "total_clicks"
 SPARSE_GROUP_MINIMUM = 30
 MISSING_IMD_LABEL = "Sin dato"
+RISK_RESULTS = {"Withdrawn", "Fail"}
+NON_RISK_RESULTS = {"Pass", "Distinction"}
+RISK_LABEL = "Riesgo académico"
+NON_RISK_LABEL = "Resultado favorable"
 
 DISPLAY_LABELS = {
     "code_module": "Código de curso",
@@ -55,6 +59,8 @@ class ExploratoryDataAnalysis:
             or pd.api.types.is_bool_dtype(self.df[column])
         ]
         self.generated_files: list[Path] = []
+        metadata_path = self.data_dir / "oulad_training_metadata.json"
+        self.cutoff_day = json.loads(metadata_path.read_text(encoding="utf-8")).get("cutoff_day") if metadata_path.exists() else None
 
     @property
     def candidate_features(self) -> list[str]:
@@ -95,6 +101,24 @@ class ExploratoryDataAnalysis:
             raise ValueError(f"La entrada del EDA no contiene las columnas requeridas: {missing_columns}")
         if self.df.duplicated(KEY_COLUMNS).any():
             raise ValueError("La entrada del EDA debe tener una fila por clave de matrícula")
+        known_results = RISK_RESULTS | NON_RISK_RESULTS
+        unexpected_results = sorted(set(self.df["final_result"].dropna()).difference(known_results))
+        if self.df["final_result"].isna().any() or unexpected_results:
+            raise ValueError("final_result debe contener únicamente Withdrawn, Fail, Pass o Distinction")
+
+    def _remove_obsolete_generated_artifacts(self) -> None:
+        """Remove only former EDA outputs whose names no longer describe the hypothesis."""
+        obsolete = [
+            self.output_dir / "course_presentation_outcome_summary.csv",
+            self.output_dir / "engagement_outcome_summary.csv",
+            self.output_dir / "pass_rate_by_student_characteristics.csv",
+            self.fig_dir / "course_presentation_outcomes.png",
+            self.fig_dir / "observed_score_by_engagement_quantile.png",
+            self.fig_dir / "pass_rate_by_engagement_quantile.png",
+            self.fig_dir / "pass_rate_by_student_characteristics.png",
+        ]
+        for path in obsolete:
+            path.unlink(missing_ok=True)
 
     def cohort_snapshot(self) -> pd.DataFrame:
         rows = [
@@ -206,75 +230,75 @@ class ExploratoryDataAnalysis:
         ranks = self.df[ENGAGEMENT_COLUMN].rank(method="first")
         return pd.qcut(ranks, q=4, labels=["Q1", "Q2", "Q3", "Q4"])
 
-    def outcome_relationships(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-        working = self.df.assign(engagement_quantile=self._engagement_quantiles())
-        engagement = working.groupby("engagement_quantile", observed=True).agg(
-            n_total=(PASS_COLUMN, "size"),
-            pass_rate=(PASS_COLUMN, "mean"),
-            n_scored=(SCORE_COLUMN, "count"),
-            observed_score_mean=(SCORE_COLUMN, "mean"),
-        ).reset_index()
-        engagement["observed_score_share"] = engagement["n_scored"] / engagement["n_total"]
-        self._write_csv(engagement, "engagement_outcome_summary.csv")
+    def academic_risk_analysis(self) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """Describe final outcomes without adding outcomes to model candidate features."""
+        working = self.df.assign(
+            engagement_quantile=self._engagement_quantiles(),
+            academic_risk=self.df["final_result"].isin(RISK_RESULTS),
+        )
+        final_result = working.groupby("final_result", observed=True).size().rename("n_total").reset_index()
+        final_result["share"] = final_result["n_total"] / len(working)
+        self._write_csv(final_result, "final_result_distribution.csv")
 
-        characteristics = []
-        for column in ["gender", "age_band", "highest_education", "imd_band"]:
-            if column not in working:
-                continue
-            values = working[column].fillna(MISSING_IMD_LABEL) if column == "imd_band" else working[column]
-            grouped = working.assign(**{column: values}).groupby(column, observed=True).agg(
-                n_total=(PASS_COLUMN, "size"), pass_rate=(PASS_COLUMN, "mean")
-            ).reset_index().rename(columns={column: "category"})
-            grouped.insert(0, "characteristic", column)
-            characteristics.append(grouped)
-        characteristic_summary = pd.concat(characteristics, ignore_index=True)
-        self._write_csv(characteristic_summary, "pass_rate_by_student_characteristics.csv")
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        axis.bar(final_result["final_result"], final_result["n_total"], color="#386641")
+        axis.set_title("Distribución del resultado académico final")
+        axis.set_xlabel("Resultado final")
+        axis.set_ylabel("Filas de matrícula")
+        self._save_figure(figure, "final_result_distribution.png")
+
+        risk = working.groupby("academic_risk", observed=True).size().rename("n_total").reset_index()
+        risk["academic_risk"] = np.where(risk["academic_risk"], RISK_LABEL, NON_RISK_LABEL)
+        risk["share"] = risk["n_total"] / len(working)
+        self._write_csv(risk, "academic_risk_distribution.csv")
+
+        engagement = working.groupby("engagement_quantile", observed=True).agg(
+            n_total=("academic_risk", "size"),
+            n_academic_risk=("academic_risk", "sum"),
+        ).reset_index()
+        engagement["academic_risk_rate"] = engagement["n_academic_risk"] / engagement["n_total"]
+        self._write_csv(engagement, "academic_risk_by_engagement_quartile.csv")
 
         course = working.groupby(["code_module", "code_presentation"], observed=True).agg(
-            n_total=(PASS_COLUMN, "size"),
-            pass_rate=(PASS_COLUMN, "mean"),
-            n_scored=(SCORE_COLUMN, "count"),
-            observed_score_mean=(SCORE_COLUMN, "mean"),
+            n_total=("academic_risk", "size"),
+            n_academic_risk=("academic_risk", "sum"),
         ).reset_index()
+        course["academic_risk_rate"] = course["n_academic_risk"] / course["n_total"]
         course["suppressed"] = course["n_total"] < SPARSE_GROUP_MINIMUM
-        course.loc[course["suppressed"], ["pass_rate", "observed_score_mean"]] = np.nan
-        course["observed_score_share"] = course["n_scored"] / course["n_total"]
-        self._write_csv(course, "course_presentation_outcome_summary.csv")
+        course.loc[course["suppressed"], "academic_risk_rate"] = np.nan
+        self._write_csv(course, "academic_risk_by_course_presentation.csv")
+
+        score_missingness = working.groupby("final_result", observed=True).agg(
+            n_total=(SCORE_COLUMN, "size"),
+            n_score_missing=(SCORE_COLUMN, lambda values: values.isna().sum()),
+        ).reset_index()
+        score_missingness["score_missing_rate"] = score_missingness["n_score_missing"] / score_missingness["n_total"]
+        self._write_csv(score_missingness, "score_missingness_by_final_result.csv")
 
         figure, axis = plt.subplots(figsize=(8, 4.5))
-        axis.bar(engagement["engagement_quantile"].astype(str), engagement["pass_rate"] * 100, color="#386641")
-        axis.set_title("Tasa de aprobación por cuartil de interacción antes del corte")
+        axis.bar(score_missingness["final_result"], score_missingness["score_missing_rate"] * 100, color="#f4a261")
+        axis.set_title("Faltantes de puntuación por resultado académico final")
+        axis.set_xlabel("Resultado final")
+        axis.set_ylabel("Filas sin puntuación ponderada (%)")
+        self._save_figure(figure, "score_missingness_by_final_result.png")
+
+        figure, axis = plt.subplots(figsize=(8, 4.5))
+        axis.bar(engagement["engagement_quantile"].astype(str), engagement["academic_risk_rate"] * 100, color="#bc4749")
+        axis.set_title("Tasa de riesgo académico por cuartil de interacción antes del corte")
         axis.set_xlabel("Cuartil de interacción según total de clics")
-        axis.set_ylabel("Tasa de aprobación (%)")
-        self._save_figure(figure, "pass_rate_by_engagement_quantile.png")
-
-        imd = characteristic_summary[characteristic_summary["characteristic"] == "imd_band"]
-        figure, axis = plt.subplots(figsize=(10, 4.5))
-        axis.bar(imd["category"], imd["pass_rate"] * 100, color="#6a4c93")
-        axis.set_title("Tasa de aprobación por banda IMD, incluidos los valores faltantes")
-        axis.set_xlabel(self._display_label("imd_band"))
-        axis.set_ylabel("Tasa de aprobación (%)")
-        axis.tick_params(axis="x", rotation=45)
-        self._save_figure(figure, "pass_rate_by_student_characteristics.png")
-
-        figure, axis = plt.subplots(figsize=(8, 4.5))
-        labels = [f"{row.engagement_quantile}\n{row.n_scored}/{row.n_total} con puntuación" for row in engagement.itertuples()]
-        axis.bar(labels, engagement["observed_score_mean"], color="#f4a261")
-        axis.set_title("Puntuación observada de evaluación por interacción antes del corte")
-        axis.set_xlabel("Cuartil de interacción (con puntuación/total)")
-        axis.set_ylabel("Puntuación media observada de evaluación")
-        self._save_figure(figure, "observed_score_by_engagement_quantile.png")
+        axis.set_ylabel("Tasa de riesgo académico (%)")
+        self._save_figure(figure, "academic_risk_by_engagement_quartile.png")
 
         visible_course = course[~course["suppressed"]].copy()
         figure, axis = plt.subplots(figsize=(10, 4.5))
         labels = visible_course["code_module"] + " " + visible_course["code_presentation"]
-        axis.bar(labels, visible_course["pass_rate"] * 100, color="#0077b6")
-        axis.set_title(f"Tasas de aprobación por curso y presentación (grupos n >= {SPARSE_GROUP_MINIMUM})")
+        axis.bar(labels, visible_course["academic_risk_rate"] * 100, color="#0077b6")
+        axis.set_title(f"Tasas de riesgo académico por curso y presentación (grupos n >= {SPARSE_GROUP_MINIMUM})")
         axis.set_xlabel("Curso y presentación")
-        axis.set_ylabel("Tasa de aprobación (%)")
+        axis.set_ylabel("Tasa de riesgo académico (%)")
         axis.tick_params(axis="x", rotation=45)
-        self._save_figure(figure, "course_presentation_outcomes.png")
-        return engagement, characteristic_summary, course
+        self._save_figure(figure, "academic_risk_by_course_presentation.png")
+        return final_result, risk, engagement, course, score_missingness
 
     def write_report(
         self,
@@ -282,8 +306,11 @@ class ExploratoryDataAnalysis:
         quality: pd.DataFrame,
         missingness: pd.DataFrame,
         collinearity: pd.DataFrame,
+        final_result: pd.DataFrame,
+        risk: pd.DataFrame,
         engagement: pd.DataFrame,
         course: pd.DataFrame,
+        score_missingness: pd.DataFrame,
     ) -> Path:
         values = snapshot.set_index("metric")["value"]
         score = missingness.set_index("column").loc[SCORE_COLUMN]
@@ -294,60 +321,67 @@ class ExploratoryDataAnalysis:
         first_quantile = engagement.iloc[0]
         last_quantile = engagement.iloc[-1]
         suppressed_groups = int(course["suppressed"].sum())
-        #figure_paths = [path for path in self.generated_files if path.parent == self.fig_dir]
+        risk_total = int(risk.loc[risk["academic_risk"] == RISK_LABEL, "n_total"].iloc[0])
+        risk_share = float(risk.loc[risk["academic_risk"] == RISK_LABEL, "share"].iloc[0])
+        outcome_summary = ", ".join(
+            f"{row.final_result}: {int(row.n_total):,}/{len(self.df):,} ({row.share:.2%})"
+            for row in final_result.itertuples()
+        )
+        missingness_summary = "; ".join(
+            f"{row.final_result}: {int(row.n_score_missing):,}/{int(row.n_total):,} ({row.score_missing_rate:.2%})"
+            for row in score_missingness.itertuples()
+        )
+        cutoff = f"día {self.cutoff_day}" if self.cutoff_day is not None else "corte temporal documentado"
 
         lines = [
-            "# Análisis exploratorio de datos de OULAD con prevención de fuga de información",
+            "# EDA de OULAD: alerta temprana de resultado académico adverso",
             "",
-            "## Contrato del conjunto de datos",
+            f"Este análisis descriptivo usa el artefacto de matrículas con variables observadas hasta el {cutoff}. La hipótesis principal es identificar señales tempranas de resultado académico adverso: `Withdrawn` o `Fail`, frente a `Pass` o `Distinction`.",
             "",
-            f"El artefacto contiene {int(values['enrollment_rows']):,} filas de matrícula y {int(values['columns'])} columnas. Representa a {int(values['unique_students']):,} estudiantes en {int(values['courses'])} cursos y {int(values['presentations'])} presentaciones; la clave de matrícula es `{', '.join(KEY_COLUMNS)}`.",
+            "## Hallazgos de resultado y riesgo",
             "",
-            f"El EDA considera las {int(values['candidate_features'])} columnas que no son claves ni resultados como variables candidatas. `{', '.join(TARGET_COLUMNS)}` se usan únicamente como resultados y se excluyen de las correlaciones entre variables candidatas y de las comprobaciones de colinealidad.",
+            f"Distribución de `final_result`: {outcome_summary}.",
             "",
-            "## Calidad de los datos y disponibilidad de etiquetas",
+            "![Distribución del resultado final](figures/final_result_distribution.png)",
             "",
-            f"Están presentes todas las columnas de claves y resultados requeridas, sin claves de matrícula duplicadas. {zero_vle:,} filas de matrícula tienen cero clics en el VLE antes del corte temporal.",
+            f"El grupo descriptivo `{RISK_LABEL}` reúne `Withdrawn` y `Fail`: {risk_total:,}/{len(self.df):,} matrículas ({risk_share:.2%}). `{NON_RISK_LABEL}` reúne `Pass` y `Distinction`. Esta agrupación se usa solo para describir resultados y no es una variable candidata del modelo.",
             "",
-            f"`{SCORE_COLUMN}` se observa en {int(score['available_count']):,}/{len(self.df):,} filas de matrícula ({score['available_count'] / len(self.df):.2%}) y falta en {int(score['missing_count']):,}/{len(self.df):,} ({score['missing_share']:.2%}). `imd_band` falta en {int(imd['missing_count']):,}/{len(self.df):,} filas ({imd['missing_share']:.2%}) y se muestra con la etiqueta `{MISSING_IMD_LABEL}` en las vistas de características.",
+            f"La tasa descriptiva de riesgo académico es {first_quantile['academic_risk_rate']:.2%} en Q1 y {last_quantile['academic_risk_rate']:.2%} en Q4 de interacción. Cada tasa conserva su denominador: Q1 {int(first_quantile['n_academic_risk']):,}/{int(first_quantile['n_total']):,}; Q4 {int(last_quantile['n_academic_risk']):,}/{int(last_quantile['n_total']):,}.",
+            "",
+            "![Riesgo académico por interacción](figures/academic_risk_by_engagement_quartile.png)",
+            "",
+            f"Por curso y presentación se suprimen las tasas de {suppressed_groups} grupos con n inferior a {SPARSE_GROUP_MINIMUM}; las tasas visibles se acompañan de su denominador en `academic_risk_by_course_presentation.csv`.",
+            "",
+            "![Riesgo académico por curso y presentación](figures/academic_risk_by_course_presentation.png)",
+            "",
+            "## Disponibilidad de puntuaciones",
+            "",
+            f"Faltantes de `{SCORE_COLUMN}` por resultado final: {missingness_summary}. Los porcentajes se calculan dentro de cada `final_result`; describen disponibilidad de datos y no explican ni causan el resultado.",
+            "",
+            "![Faltantes de puntuación por resultado final](figures/score_missingness_by_final_result.png)",
             "",
             "![Valores faltantes y puntuaciones observadas](figures/missingness_and_observed_scores.png)",
             "",
-            "## Interacción de la cohorte",
+            "## Cohorte y calidad de datos",
             "",
-            f"La distribución de interacción resume `total_clicks`, una medida agregada de uso del VLE antes del corte temporal, para cada fila de matrícula. Tras una segmentación determinista basada en rangos, cada cuartil de interacción contiene entre {int(first_quantile['n_total']):,} y {int(last_quantile['n_total']):,} filas de matrícula.",
+            f"El artefacto contiene {int(values['enrollment_rows']):,} filas de matrícula y {int(values['columns'])} columnas. Representa a {int(values['unique_students']):,} estudiantes en {int(values['courses'])} cursos y {int(values['presentations'])} presentaciones; la clave de matrícula es `{', '.join(KEY_COLUMNS)}`. {zero_vle:,} filas tienen cero clics en el VLE antes del corte.",
+            "",
+            f"`{SCORE_COLUMN}` se observa en {int(score['available_count']):,}/{len(self.df):,} filas ({score['available_count'] / len(self.df):.2%}) y falta en {int(score['missing_count']):,}/{len(self.df):,} ({score['missing_share']:.2%}). `imd_band` falta en {int(imd['missing_count']):,}/{len(self.df):,} filas ({imd['missing_share']:.2%}) y se muestra con la etiqueta `{MISSING_IMD_LABEL}`.",
             "",
             "![Interacción de la cohorte](figures/cohort_engagement_total_clicks.png)",
             "",
             "![Perfil categórico de la cohorte](figures/categorical_cohort_profile.png)",
             "",
-            "## Relaciones con los resultados",
-            "",
-            f"Las tasas de aprobación observadas van de {first_quantile['pass_rate']:.2%} en el cuartil de interacción Q1 a {last_quantile['pass_rate']:.2%} en Q4. Estas comparaciones descriptivas no establecen una relación causal ni un resultado de un modelo predictivo.",
-            "",
-            f"La comparación de puntuaciones observadas informa tanto la disponibilidad como el denominador: Q1 tiene {int(first_quantile['n_scored']):,}/{int(first_quantile['n_total']):,} filas con puntuación y Q4 tiene {int(last_quantile['n_scored']):,}/{int(last_quantile['n_total']):,}. Los resultados por curso y presentación suprimen las tasas y las medias de puntuación observada de {suppressed_groups} grupos con n inferior a {SPARSE_GROUP_MINIMUM}.",
-            "",
-            "![Tasa de aprobación por interacción](figures/pass_rate_by_engagement_quantile.png)",
-            "",
-            "![Tasa de aprobación por características del estudiantado](figures/pass_rate_by_student_characteristics.png)",
-            "",
-            "![Puntuación observada por interacción](figures/observed_score_by_engagement_quantile.png)",
-            "",
-            "![Resultados por curso y presentación](figures/course_presentation_outcomes.png)",
-            "",
             "## Preparación para el modelado y exclusiones por fuga de información",
             "",
-            f"Las correlaciones de Spearman usan únicamente variables candidatas numéricas y excluyen los identificadores de matrícula y todos los resultados. El resumen de colinealidad identifica {near_duplicates} {near_duplicate_label} de variables candidatas con correlación absoluta de Spearman de al menos 0.95; es un artefacto de cribado, no de selección de variables.",
+            f"El EDA considera las {int(values['candidate_features'])} columnas que no son claves ni resultados como variables candidatas. `{', '.join(TARGET_COLUMNS)}` y la agrupación descriptiva `academic_risk` no se usan como variables de modelo ni aparecen en correlaciones o comprobaciones de colinealidad.",
             "",
-            "No se genera aquí una matriz de confusión, porque corresponde a la evaluación del modelo con datos de prueba reservados y no al análisis exploratorio.",
+            f"Las correlaciones de Spearman usan únicamente variables candidatas numéricas. El resumen de colinealidad identifica {near_duplicates} {near_duplicate_label} de variables candidatas con correlación absoluta de Spearman de al menos 0.95; es un cribado, no una selección de variables.",
+            "",
+            "Estas comparaciones son descriptivas: no demuestran causalidad, no evalúan un modelo predictivo y no sustituyen una evaluación temporal con datos reservados.",
             "",
             "![Correlaciones entre variables candidatas](figures/candidate_feature_spearman_correlations.png)",
-            "",
-            "## Apéndice: archivos generados",
-            "",
         ]
-        # lines.extend(f"- `{path.relative_to(self.output_dir).as_posix()}`" for path in sorted(self.generated_files))
-        # lines.append("- `eda_report.md`")
         report = self.output_dir / "eda_report.md"
         report.write_text("\n".join(lines) + "\n", encoding="utf-8")
         self.generated_files.append(report)
@@ -356,14 +390,15 @@ class ExploratoryDataAnalysis:
     def run_all(self) -> list[Path]:
         """Run all leakage-safe descriptive analyses and return their manifest."""
         self.validate_contract()
+        self._remove_obsolete_generated_artifacts()
         snapshot = self.cohort_snapshot()
         quality = self.data_quality()
         self.categorical_profile()
         missingness = self.missingness_and_scores()
         correlation = self.candidate_spearman_correlations()
         collinearity = self.collinearity_summary(correlation)
-        engagement, _, course = self.outcome_relationships()
-        self.write_report(snapshot, quality, missingness, collinearity, engagement, course)
+        final_result, risk, engagement, course, score_missingness = self.academic_risk_analysis()
+        self.write_report(snapshot, quality, missingness, collinearity, final_result, risk, engagement, course, score_missingness)
         return self.generated_files
 
 
