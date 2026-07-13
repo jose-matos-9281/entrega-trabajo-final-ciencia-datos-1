@@ -20,7 +20,8 @@ from .feature_contract import (
     contract_fingerprint,
     validate_raw_features,
 )
-from .risk_model import ARTIFACT_VERSION, MANIFEST_FILENAME, MODEL_FILENAME, train_risk_champion
+from .risk_model import ARTIFACT_VERSION, MANIFEST_FILENAME, MODEL_FILENAME
+from .train_ml import ModelTrainer
 
 
 REQUIRED_SHEETS = ("StudentInfo", "Registration", "VLE_clickStream", "cursos")
@@ -210,7 +211,7 @@ def train_inference_model(training_data: Path, metadata_path: Path, artifacts_di
     if isinstance(cutoff_day, bool) or not isinstance(cutoff_day, int):
         raise ValueError("Training metadata must contain an integer cutoff_day")
     frame = pd.read_csv(training_data)
-    return train_risk_champion(frame, artifacts_dir, cutoff_day).as_dict()
+    return ModelTrainer.for_risk_training(frame, artifacts_dir, cutoff_day).train_risk_champion().as_dict()
 
 
 def _oov_columns(model: Pipeline, features: pd.DataFrame) -> pd.Series:
@@ -307,7 +308,7 @@ def predict_excel(excel_path: Path, artifacts_dir: Path, output_path: Path, cuto
 def main_train() -> None:
     project_dir = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Train persisted OULAD Excel inference artifacts.")
-    parser.add_argument("--training-data", type=Path, default=project_dir / "data" / "oulad_kongo_full.csv")
+    parser.add_argument("--training-data", type=Path, default=project_dir / "data" / "oulad_training_full.csv")
     parser.add_argument("--training-metadata", type=Path, default=project_dir / "data" / "oulad_training_metadata.json")
     parser.add_argument("--artifacts-dir", type=Path, default=project_dir / "artifacts")
     args = parser.parse_args()

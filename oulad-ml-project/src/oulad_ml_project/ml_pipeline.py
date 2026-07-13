@@ -28,7 +28,6 @@ import json
 from pathlib import Path
 from .preprocessing import DataPreprocessor
 from .train_ml import ModelTrainer
-from .risk_model import train_risk_champion
 warnings.filterwarnings('ignore')
 
 # ------------------------------------------------------------
@@ -95,7 +94,8 @@ class MLPipeline:
         metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
         cutoff_day = metadata.get("cutoff_day")
         print("\n[MODEL] Training risk-classifier candidates...")
-        artifacts = train_risk_champion(self.df, self.output_dir / "artifacts", cutoff_day)
+        self.trainer = ModelTrainer.for_risk_training(self.df, self.output_dir / "artifacts", cutoff_day)
+        artifacts = self.trainer.train_risk_champion()
         self.results = artifacts.as_dict()
         return self.results
 
@@ -132,6 +132,6 @@ def main():
     data_dir.mkdir(parents=True, exist_ok=True)
     output_dir = data_dir/".." / "output"
     output_dir.mkdir(parents=True, exist_ok=True)
-    data_path = data_dir / "oulad_kongo_full.csv"
+    data_path = data_dir / "oulad_training_full.csv"
     pipeline = MLPipeline(data_path, data_dir, output_dir)
     pipeline.run()

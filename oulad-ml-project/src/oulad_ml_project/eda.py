@@ -371,7 +371,7 @@ def main() -> None:
     """Run the full exploratory data analysis from a CSV artifact."""
     project_dir = Path(__file__).resolve().parents[2]
     parser = argparse.ArgumentParser(description="Ejecuta el análisis exploratorio de datos de OULAD con prevención de fuga de información.")
-    parser.add_argument("--input-csv", type=Path, default=project_dir / "data" / "oulad_kongo_full.csv")
+    parser.add_argument("--input-csv", type=Path, default=project_dir / "data" / "oulad_training_full.csv")
     parser.add_argument("--output-dir", type=Path, default=project_dir / "output" / "eda")
     args = parser.parse_args()
     manifest = ExploratoryDataAnalysis(pd.read_csv(args.input_csv), args.input_csv.parent, args.output_dir).run_all()

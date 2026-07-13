@@ -1,8 +1,4 @@
-"""Generate reproducible OULAD training artifacts from the canonical Neon source.
-
-``oulad_kongo_full.csv`` is retained only as a temporary compatibility filename.
-Its content is real OULAD data and deliberately contains no Kongo columns.
-"""
+"""Generate reproducible OULAD training artifacts from the canonical Neon source."""
 
 from __future__ import annotations
 
@@ -16,7 +12,7 @@ import pandas as pd
 from .data_sources import KEY_COLUMNS, TARGET_COLUMNS, load_training_mart
 
 
-FULL_ARTIFACT_NAME = "oulad_kongo_full.csv"
+FULL_ARTIFACT_NAME = "oulad_training_full.csv"
 FEATURES_ARTIFACT_NAME = "features.csv"
 TARGETS_ARTIFACT_NAME = "targets.csv"
 METADATA_ARTIFACT_NAME = "oulad_training_metadata.json"
@@ -61,7 +57,7 @@ def write_training_artifacts(
 
     timestamp = generated_at or datetime.now(timezone.utc)
     metadata = {
-        "artifact_version": 1,
+        "artifact_version": 2,
         "cutoff_day": cutoff_day,
         "generated_at": timestamp.astimezone(timezone.utc).isoformat(),
         "source": "postgresql_neon_via_duckdb_read_only",
@@ -70,9 +66,10 @@ def write_training_artifacts(
         "row_count": len(full),
         "feature_column_count": len(features.columns) - len(KEY_COLUMNS),
         "target_column_count": len(TARGET_COLUMNS),
-        "full_artifact_compatibility": {
-            "filename": FULL_ARTIFACT_NAME,
-            "reason": "temporary legacy filename only; content is OULAD and has no Kongo columns",
+        "artifacts": {
+            "full": FULL_ARTIFACT_NAME,
+            "features": FEATURES_ARTIFACT_NAME,
+            "targets": TARGETS_ARTIFACT_NAME,
         },
     }
     paths["metadata"].write_text(

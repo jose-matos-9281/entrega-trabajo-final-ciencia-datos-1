@@ -12,7 +12,7 @@ This project trains leakage-safe OULAD enrollment models from the canonical Neon
 ```bash
 uv sync
 uv run create-data --cutoff-day 30 --output-dir data
-uv run train-inference-model --training-data data/oulad_kongo_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
+uv run train-inference-model --training-data data/oulad_training_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
 uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cutoff-day 30 --output output/excel_predictions.csv
 ```
 
@@ -23,10 +23,11 @@ uv run predict-excel --excel oulad-dataset.xlsx --artifacts-dir artifacts --cuto
 | Neon/Postgres | Canonical OULAD source queried through DuckDB with `READ_ONLY`. |
 | `sql/oulad_training_mart.sql` | Builds one enrollment row per `id_student`, `code_module`, and `code_presentation`. |
 | `create-data` | Writes deterministic training artifacts and cutoff metadata. |
-| `train-inference-model` | Evaluates Logistic Regression, Random Forest, and Gradient Boosting pipelines, then persists the risk-recall champion. |
+| `ModelTrainer` | Owns production risk training, artifact reporting, and reproducible charts. Its legacy multi-target methods are exploratory analysis only. |
+| `ml_pipeline` / `train-inference-model` | Coordinate data loading and delegate champion publication to `ModelTrainer`. |
 | `predict-excel` | Maps approved Excel sheets to the same enrollment feature contract and writes a new prediction CSV. |
 
-The three enrollment key columns are metadata, not model features. In particular, `id_student` is never a feature. `oulad_kongo_full.csv` is a temporary compatibility filename only; it contains OULAD data and no Kongo columns.
+The three enrollment key columns are metadata, not model features. In particular, `id_student` is never a feature. `oulad_training_full.csv` is the enrollment-level mart for EDA and model training; `features.csv` excludes all targets and `targets.csv` contains the keys plus all targets.
 
 ## Requirements And Setup
 
@@ -56,7 +57,9 @@ This writes:
 
 | Output | Contents |
 |---|---|
-| `data/oulad_kongo_full.csv` | Enrollment mart, features, and training targets. |
+| `data/oulad_training_full.csv` | Enrollment mart for EDA and model training. |
+| `data/features.csv` | Enrollment keys and candidate features, excluding every target column. |
+| `data/targets.csv` | Enrollment keys and outcome targets, including `final_result`. |
 | `data/features.csv` | Keys plus permitted source features. |
 | `data/targets.csv` | Keys plus `passed`, `performance_tier`, and `weighted_assessment_score`. |
 | `data/oulad_training_metadata.json` | Artifact version, source, cutoff, and column counts. |
@@ -64,12 +67,14 @@ This writes:
 ## Train And Persist Inference Artifacts
 
 ```bash
-uv run train-inference-model --training-data data/oulad_kongo_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
+uv run train-inference-model --training-data data/oulad_training_full.csv --training-metadata data/oulad_training_metadata.json --artifacts-dir artifacts
 ```
 
 The command performs a grouped split by `id_student` before fitting any imputer, encoder, or scaler. It evaluates all candidates with `passed=0` as the risk class and selects the champion by `risk_recall`; risk precision, risk F1, ROC-AUC, and general metrics remain guardrails rather than a substitute for the operational objective.
 
-It persists `artifacts/passed_model.joblib`, `artifacts/inference_manifest.json`, `artifacts/training_report.json`, `artifacts/training_metrics.csv`, and `artifacts/evaluation_predictions.csv`. The serialized bundle is the evaluated champion, fit only on the training partition. The manifest pins the cutoff and versioned raw feature-contract fingerprint. Prediction refuses an artifact whose cutoff or feature contract differs from the requested run.
+It persists a versioned champion bundle, JSON report, candidate-metrics CSV, and holdout-predictions CSV, plus a stable `artifacts/inference_manifest.json`. It also writes non-interactive PNG charts under `artifacts/figures/`: candidate metric comparison, champion holdout confusion matrix, and feature importance when the champion exposes coefficients or `feature_importances_`. The report references every artifact, records the grouped split, train-only CV selection, holdout metrics, feature contract, and limitations. The manifest repeats the artifact references for discovery while inference continues to consume only the manifest and champion bundle.
+
+The serialized bundle is the evaluated champion, fit only on the training partition. Candidate selection uses GroupKFold only within that partition, prioritizing recall for risk class `passed=0`; the independent grouped holdout is evaluated only after selection. Feature importance is omitted, with an explicit reason in the report, for models that do not expose a supported importance interface. Prediction refuses an artifact whose cutoff or feature contract differs from the requested run.
 
 ## Predict From Excel
 

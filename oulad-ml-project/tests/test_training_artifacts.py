@@ -11,6 +11,7 @@ import pandas as pd
 
 from oulad_ml_project.data_generator import write_training_artifacts
 from oulad_ml_project.data_sources import KEY_COLUMNS, SQL_PATH, TARGET_COLUMNS, load_training_mart
+from oulad_ml_project.ml_pipeline import MLPipeline
 from oulad_ml_project.preprocessing import DataPreprocessor
 from oulad_ml_project.train_ml import ModelTrainer
 
@@ -60,7 +61,9 @@ class TrainingArtifactsTest(unittest.TestCase):
         self.assertFalse(any("kongo" in column.lower() for column in full.columns))
         self.assertEqual(metadata["cutoff_day"], 30)
         self.assertEqual(metadata["row_count"], 2)
-        self.assertIn("no Kongo columns", metadata["full_artifact_compatibility"]["reason"])
+        self.assertEqual(metadata["artifacts"]["full"], "oulad_training_full.csv")
+        self.assertEqual(metadata["artifacts"]["features"], "features.csv")
+        self.assertEqual(metadata["artifacts"]["targets"], "targets.csv")
 
     def test_sql_filters_vle_rows_after_cutoff(self):
         connection = duckdb.connect()
@@ -197,6 +200,22 @@ class TrainingArtifactsTest(unittest.TestCase):
             train_students = set(frame.loc[X_train.index, "id_student"])
             test_students = set(frame.loc[X_test.index, "id_student"])
             self.assertFalse(train_students & test_students)
+
+    def test_ml_pipeline_delegates_champion_training_to_model_trainer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "oulad_training_metadata.json").write_text('{"cutoff_day": 30}', encoding="utf-8")
+            pipeline = MLPipeline(root / "unused.csv", root, root / "output")
+            pipeline.df = pd.DataFrame({"passed": [0, 1]})
+            artifacts = Mock(as_dict=Mock(return_value={"model": root / "passed_model.joblib"}))
+            trainer = Mock(train_risk_champion=Mock(return_value=artifacts))
+
+            with patch("oulad_ml_project.ml_pipeline.ModelTrainer.for_risk_training", return_value=trainer) as factory:
+                result = pipeline.train_models()
+
+        factory.assert_called_once_with(pipeline.df, root / "output" / "artifacts", 30)
+        trainer.train_risk_champion.assert_called_once_with()
+        self.assertEqual(result, {"model": root / "passed_model.joblib"})
 
 
 if __name__ == "__main__":

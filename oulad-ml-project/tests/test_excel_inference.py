@@ -221,6 +221,13 @@ class ExcelInferenceTest(unittest.TestCase):
             manifest = json.loads(paths["manifest"].read_text(encoding="utf-8"))
             report = json.loads(paths["report"].read_text(encoding="utf-8"))
             bundle = joblib.load(paths["model"])
+            artifact_exists = [
+                (paths["report"].parent / report["artifacts"]["candidate_metrics_csv"]).exists(),
+                (paths["report"].parent / report["artifacts"]["holdout_predictions_csv"]).exists(),
+                (paths["report"].parent / report["artifacts"]["candidate_metrics_plot"]).exists(),
+                (paths["report"].parent / report["artifacts"]["champion_confusion_matrix_plot"]).exists(),
+                (paths["report"].parent / report["artifacts"]["champion_feature_importance"]["path"]).exists(),
+            ]
             predict_excel(workbook, root / "artifacts", output, 30)
             inference_report = json.loads(output.with_suffix(".inference_report.json").read_text(encoding="utf-8"))
 
@@ -235,6 +242,9 @@ class ExcelInferenceTest(unittest.TestCase):
 
         self.assertEqual(manifest["champion_name"], report["champion"]["name"])
         self.assertEqual(bundle.named_steps["classifier"].__class__.__name__, manifest["champion_name"])
+        self.assertEqual(manifest["training_artifacts"], report["artifacts"])
+        self.assertEqual(report["artifacts"]["champion_feature_importance"]["status"], "generated")
+        self.assertTrue(all(artifact_exists))
         self.assertEqual(manifest["training_rows"], len(train_positions))
         self.assertEqual(report["selection"]["strategy"], "GroupKFold")
         self.assertEqual(report["selection"]["rows"], len(train_positions))

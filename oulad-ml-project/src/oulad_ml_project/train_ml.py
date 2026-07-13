@@ -22,9 +22,13 @@
 =============================================================================
 """
 
+import json
 import os
+import joblib
 import numpy as np
 import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from sklearn.model_selection import GroupShuffleSplit
 from sklearn.preprocessing import LabelEncoder
@@ -38,6 +42,7 @@ from sklearn.metrics import (accuracy_score, precision_score, recall_score, f1_s
 from sklearn.cluster import KMeans
 import warnings
 from pathlib import Path
+from .risk_model import TrainingArtifacts, train_risk_champion
 warnings.filterwarnings('ignore')
 
 # ------------------------------------------------------------
@@ -70,13 +75,102 @@ class ModelTrainer:
       - No supervisado: KMeans (k=3)
     """
 
-    def __init__(self, X, y_dict, output_dir:Path, student_groups):
+    def __init__(self, X=None, y_dict=None, output_dir: Path | None = None, student_groups=None,
+                 *, training_frame: pd.DataFrame | None = None, cutoff_day: int | None = None):
+        """Create an auxiliary-analysis trainer or the production risk-training facade.
+
+        The legacy multi-target methods remain available for exploratory analysis,
+        but only ``train_risk_champion`` publishes the inference champion bundle.
+        """
         self.X = X
         self.y_dict = y_dict
         self.output_dir = output_dir
-        self.student_groups = student_groups.loc[X.index]
+        self.student_groups = student_groups.loc[X.index] if student_groups is not None and X is not None else None
+        self.training_frame = training_frame
+        self.cutoff_day = cutoff_day
         self.results = {}
         self.models = {}
+
+    @classmethod
+    def for_risk_training(cls, frame: pd.DataFrame, artifacts_dir: Path, cutoff_day: int) -> "ModelTrainer":
+        """Construct the sole production facade for the leakage-safe risk champion."""
+        return cls(output_dir=artifacts_dir, training_frame=frame, cutoff_day=cutoff_day)
+
+    def train_risk_champion(self) -> TrainingArtifacts:
+        """Publish the leakage-safe champion and its reproducible training evidence."""
+        if self.training_frame is None or self.output_dir is None or self.cutoff_day is None:
+            raise ValueError("risk training requires frame, artifacts_dir, and cutoff_day")
+        artifacts = train_risk_champion(self.training_frame, self.output_dir, self.cutoff_day)
+        return self._add_risk_visualizations(artifacts)
+
+    def _add_risk_visualizations(self, artifacts: TrainingArtifacts) -> TrainingArtifacts:
+        """Add non-interactive visual evidence without changing champion selection."""
+        report = json.loads(artifacts.report.read_text(encoding="utf-8"))
+        manifest = json.loads(artifacts.manifest.read_text(encoding="utf-8"))
+        candidates = pd.read_csv(artifacts.metrics)
+        holdout = pd.read_csv(artifacts.evaluation_predictions)
+        figures_dir = self.output_dir / "figures"
+        figures_dir.mkdir(parents=True, exist_ok=True)
+        version = artifacts.model.name.removesuffix("-passed_model.joblib")
+
+        metrics_plot = figures_dir / f"{version}-candidate_metrics.png"
+        plot_metrics = ["risk_recall", "risk_precision", "risk_f1", "accuracy", "roc_auc"]
+        candidates.set_index("model")[plot_metrics].plot(kind="bar", figsize=(11, 6))
+        plt.ylabel("Cross-validation mean")
+        plt.title("Risk-model candidate comparison")
+        plt.tight_layout()
+        plt.savefig(metrics_plot, dpi=150)
+        plt.close()
+
+        confusion_plot = figures_dir / f"{version}-champion_confusion_matrix.png"
+        ConfusionMatrixDisplay.from_predictions(
+            holdout["passed_actual"], holdout["prediction_passed"], labels=[0, 1], cmap="Blues"
+        )
+        plt.title(f"Champion holdout confusion matrix: {report['champion']['name']}")
+        plt.tight_layout()
+        plt.savefig(confusion_plot, dpi=150)
+        plt.close()
+
+        model = joblib.load(artifacts.model)
+        classifier = model.named_steps["classifier"]
+        feature_importance: dict[str, object] = {
+            "status": "unavailable",
+            "reason": f"{classifier.__class__.__name__} does not expose coefficients or feature_importances_",
+        }
+        importance_plot = None
+        if hasattr(classifier, "coef_") or hasattr(classifier, "feature_importances_"):
+            names = model.named_steps["preprocessor"].get_feature_names_out()
+            values = np.abs(classifier.coef_).ravel() if hasattr(classifier, "coef_") else classifier.feature_importances_
+            top = pd.Series(values, index=names).sort_values().tail(15)
+            importance_plot = figures_dir / f"{version}-champion_feature_importance.png"
+            top.plot(kind="barh", figsize=(10, 7))
+            plt.xlabel("Absolute coefficient" if hasattr(classifier, "coef_") else "Feature importance")
+            plt.title(f"Champion feature importance: {report['champion']['name']}")
+            plt.tight_layout()
+            plt.savefig(importance_plot, dpi=150)
+            plt.close()
+            feature_importance = {"status": "generated", "path": str(importance_plot.relative_to(self.output_dir))}
+
+        artifact_paths = {
+            "model": artifacts.model.name,
+            "manifest": artifacts.manifest.name,
+            "report": artifacts.report.name,
+            "candidate_metrics_csv": artifacts.metrics.name,
+            "holdout_predictions_csv": artifacts.evaluation_predictions.name,
+            "candidate_metrics_plot": str(metrics_plot.relative_to(self.output_dir)),
+            "champion_confusion_matrix_plot": str(confusion_plot.relative_to(self.output_dir)),
+            "champion_feature_importance": feature_importance,
+        }
+        report["artifacts"] = artifact_paths
+        report["limitations"] = [
+            "Candidate metrics are GroupKFold means on the training partition, not holdout metrics.",
+            "The holdout is evaluated once after selection and must not be used for model selection.",
+            "Feature importance is only reported when the selected classifier exposes coefficients or feature_importances_.",
+        ]
+        artifacts.report.write_text(json.dumps(report, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        manifest["training_artifacts"] = artifact_paths
+        artifacts.manifest.write_text(json.dumps(manifest, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+        return artifacts
 
     def split_data(self, target_name, target_col=None):
         """
