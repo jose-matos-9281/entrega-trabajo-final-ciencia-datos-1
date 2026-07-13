@@ -186,6 +186,7 @@ def train_risk_champion(frame: pd.DataFrame, artifacts_dir: Path, cutoff_day: in
                                     "prediction_academic_risk": (probability_risk >= 0.5).astype(int).to_numpy()})
 
     version = uuid4().hex
+    print(f"\nversion {version} champion: {champion_name} (PR-AUC={holdout_metrics['pr_auc']:.4f}, Brier={holdout_metrics['brier_score']:.4f})")
     bundle_dir = artifacts_dir / version
     bundle_dir.mkdir(parents=True, exist_ok=False)
     model_path = bundle_dir / MODEL_FILENAME
